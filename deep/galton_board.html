@@ -1,0 +1,598 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+    <title>galton board · physics · normal distribution</title>
+    <style>
+        * {
+            margin: 0;
+            box-sizing: border-box;
+        }
+        body {
+            background: #1c1f2b;
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container {
+            background: #121520;
+            border-radius: 2rem;
+            padding: 1.5rem 1.8rem;
+            box-shadow: 0 20px 50px rgba(0, 0, 0, 0.7);
+            display: flex;
+            flex-wrap: wrap;
+            align-items: flex-start;
+            justify-content: center;
+            gap: 2rem;
+        }
+        canvas {
+            background: #1a1e2a;
+            border-radius: 1.5rem;
+            box-shadow: inset 0 0 30px #000000, 0 10px 30px rgba(0, 0, 0, 0.6);
+            display: block;
+            max-width: 100%;
+            height: auto;
+        }
+        .panel {
+            background: #191e2b;
+            border-radius: 1.5rem;
+            padding: 1.4rem 1.4rem;
+            color: #cbd5ee;
+            display: flex;
+            flex-direction: column;
+            gap: 1.2rem;
+            min-width: 220px;
+            border: 1px solid #2e384f;
+            box-shadow: 0 12px 25px rgba(0, 0, 0, 0.5);
+        }
+        .panel h3 {
+            font-weight: 400;
+            letter-spacing: 1px;
+            color: #b0c6ff;
+            margin: 0 0 0.2rem 0;
+            border-bottom: 1px solid #2d364f;
+            padding-bottom: 0.4rem;
+        }
+        .slider-group {
+            display: flex;
+            flex-direction: column;
+            gap: 0.3rem;
+        }
+        label {
+            font-size: 0.78rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: #8b99bb;
+            display: flex;
+            justify-content: space-between;
+        }
+        input[type="range"] {
+            width: 100%;
+            accent-color: #d08c60;
+        }
+        .value-display {
+            font-weight: 600;
+            color: #f0dfc8;
+        }
+        button {
+            background: #2f3850;
+            border: none;
+            color: #eef3ff;
+            font-weight: 500;
+            padding: 0.6rem 1.2rem;
+            border-radius: 2rem;
+            cursor: pointer;
+            letter-spacing: 0.4px;
+            border: 1px solid #46536b;
+            transition: 0.2s;
+            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.4);
+        }
+        button:hover {
+            background: #404e6b;
+            border-color: #7b8db0;
+        }
+        .stat {
+            font-size: 0.85rem;
+            color: #bcc8e0;
+            background: #10141e;
+            border-radius: 0.8rem;
+            padding: 0.5rem 0.8rem;
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <canvas id="galtonCanvas" width="620" height="480" aria-label="galton board simulation"></canvas>
+    <div class="panel">
+        <h3>⚫ galton board</h3>
+        <div class="slider-group">
+            <label>peg rows <span id="rowsVal" class="value-display">12</span></label>
+            <input type="range" id="rowsSlider" min="5" max="18" value="12" step="1">
+        </div>
+        <div class="slider-group">
+            <label>drop rate <span id="rateVal" class="value-display">4</span> /s</label>
+            <input type="range" id="rateSlider" min="1" max="15" value="4" step="0.5">
+        </div>
+        <div class="stat" id="ballCount">balls: 0</div>
+        <button id="resetButton">↺ reset board</button>
+        <div style="font-size:0.7rem;color:#5e6b85;">deterministic collisions · tiny initial offset</div>
+    </div>
+</div>
+
+<script>
+    (function () {
+        const canvas = document.getElementById('galtonCanvas');
+        const ctx = canvas.getContext('2d');
+
+        const rowsSlider = document.getElementById('rowsSlider');
+        const rateSlider = document.getElementById('rateSlider');
+        const rowsVal = document.getElementById('rowsVal');
+        const rateVal = document.getElementById('rateVal');
+        const ballCountSpan = document.getElementById('ballCount');
+
+        // --- physics constants ---
+        const GRAVITY = 680;           // pixels/s²
+        const BALL_RADIUS = 4.2;
+        const PEG_RADIUS = 5.5;
+        const RESTITUTION = 0.55;      // energy loss on peg collision
+        const FRICTION = 0.92;         // tangential friction per collision
+
+        // --- board geometry ---
+        const BOARD_TOP = 80;
+        const PEG_TOP = 130;
+        const PEG_BOTTOM_MARGIN = 50;  // space below last peg row before bins
+        const BIN_HEIGHT = 90;
+        const PEG_VERTICAL_SPACING = 28;
+        const PEG_HORIZONTAL_SPACING = 32;
+        const DROP_X_JITTER = 1.4;     // pixels, the only source of randomness
+
+        // dynamic values
+        let pegRows = 12;
+        let dropRate = 4;              // balls per second
+        let balls = [];
+        let bins = [];
+        let binDividers = [];          // x positions of bin walls
+        let totalBallsDropped = 0;
+        let spawnAccumulator = 0;
+
+        // --- peg positions ---
+        let pegs = [];
+
+        function computePegLayout(rows) {
+            pegs = [];
+            const maxPegsInRow = rows; // row 0 has 1 peg, row rows-1 has 'rows' pegs
+            // center the pattern
+            const totalWidth = (maxPegsInRow - 1) * PEG_HORIZONTAL_SPACING;
+            const startX = canvas.width / 2 - totalWidth / 2;
+
+            for (let row = 0; row < rows; row++) {
+                const pegsInThisRow = row + 1;
+                const rowWidth = (pegsInThisRow - 1) * PEG_HORIZONTAL_SPACING;
+                const rowStartX = canvas.width / 2 - rowWidth / 2;
+                const y = PEG_TOP + row * PEG_VERTICAL_SPACING;
+                for (let col = 0; col < pegsInThisRow; col++) {
+                    const x = rowStartX + col * PEG_HORIZONTAL_SPACING;
+                    pegs.push({ x, y });
+                }
+            }
+        }
+
+        function computeBins(rows) {
+            const numBins = rows + 1;
+            const maxPegsInRow = rows;
+            const totalWidth = (maxPegsInRow - 1) * PEG_HORIZONTAL_SPACING;
+            const startX = canvas.width / 2 - totalWidth / 2;
+            const binWidth = PEG_HORIZONTAL_SPACING;
+            // bin dividers
+            binDividers = [];
+            for (let i = 0; i <= numBins; i++) {
+                binDividers.push(startX - binWidth / 2 + i * binWidth);
+            }
+            // initialize bins
+            bins = new Array(numBins).fill(0);
+        }
+
+        function resetSimulation() {
+            pegRows = parseInt(rowsSlider.value);
+            dropRate = parseFloat(rateSlider.value);
+            computePegLayout(pegRows);
+            computeBins(pegRows);
+            balls = [];
+            totalBallsDropped = 0;
+            spawnAccumulator = 0;
+            updateLabels();
+        }
+
+        function updateLabels() {
+            rowsVal.textContent = pegRows;
+            rateVal.textContent = dropRate;
+            ballCountSpan.textContent = 'balls: ' + totalBallsDropped;
+        }
+
+        // --- ball spawning ---
+        function spawnBall() {
+            const maxPegsInRow = pegRows;
+            const totalWidth = (maxPegsInRow - 1) * PEG_HORIZONTAL_SPACING;
+            const startX = canvas.width / 2 - totalWidth / 2;
+            const centerX = canvas.width / 2;
+            // tiny random offset — the ONLY randomness
+            const jitter = (Math.random() - 0.5) * DROP_X_JITTER * 2;
+            const x = centerX + jitter;
+            const y = BOARD_TOP;
+            balls.push({
+                x: x,
+                y: y,
+                vx: 0,
+                vy: 0,
+                active: true,
+            });
+            totalBallsDropped++;
+        }
+
+        // --- collision detection & response ---
+        function handlePegCollision(ball, peg) {
+            const dx = ball.x - peg.x;
+            const dy = ball.y - peg.y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            const minDist = BALL_RADIUS + PEG_RADIUS;
+
+            if (dist < minDist && dist > 0.001) {
+                // normal vector (from peg to ball)
+                const nx = dx / dist;
+                const ny = dy / dist;
+
+                // separate ball
+                const overlap = minDist - dist;
+                ball.x += nx * overlap;
+                ball.y += ny * overlap;
+
+                // relative velocity along normal
+                const vn = ball.vx * nx + ball.vy * ny;
+
+                // only resolve if approaching
+                if (vn < 0) {
+                    // tangential direction
+                    const tx = -ny;
+                    const ty = nx;
+                    const vt = ball.vx * tx + ball.vy * ty;
+
+                    // reflect normal component with restitution, preserve tangential with friction
+                    ball.vx = -RESTITUTION * vn * nx + FRICTION * vt * tx;
+                    ball.vy = -RESTITUTION * vn * ny + FRICTION * vt * ty;
+                }
+            }
+        }
+
+        function handleWallCollision(ball) {
+            // side walls of the peg area
+            const margin = 15;
+            if (ball.x - BALL_RADIUS < margin) {
+                ball.x = margin + BALL_RADIUS;
+                ball.vx = Math.abs(ball.vx) * RESTITUTION;
+            }
+            if (ball.x + BALL_RADIUS > canvas.width - margin) {
+                ball.x = canvas.width - margin - BALL_RADIUS;
+                ball.vx = -Math.abs(ball.vx) * RESTITUTION;
+            }
+            // top
+            if (ball.y - BALL_RADIUS < 5) {
+                ball.y = 5 + BALL_RADIUS;
+                ball.vy = Math.abs(ball.vy) * RESTITUTION;
+            }
+        }
+
+        function getBinIndex(ballX) {
+            for (let i = 0; i < binDividers.length - 1; i++) {
+                if (ballX >= binDividers[i] && ballX < binDividers[i + 1]) {
+                    return i;
+                }
+            }
+            // edge cases
+            if (ballX < binDividers[0]) return 0;
+            if (ballX >= binDividers[binDividers.length - 1]) return binDividers.length - 2;
+            return -1;
+        }
+
+        const BIN_FLOOR_Y = PEG_TOP + 18 * PEG_VERTICAL_SPACING + PEG_BOTTOM_MARGIN;
+
+        function updateBall(ball, dt) {
+            if (!ball.active) return;
+
+            // gravity
+            ball.vy += GRAVITY * dt;
+
+            // integrate position
+            ball.x += ball.vx * dt;
+            ball.y += ball.vy * dt;
+
+            // peg collisions
+            for (const peg of pegs) {
+                handlePegCollision(ball, peg);
+            }
+
+            // wall collisions
+            handleWallCollision(ball);
+
+            // check if ball reached bin area
+            const binFloor = PEG_TOP + pegRows * PEG_VERTICAL_SPACING + PEG_BOTTOM_MARGIN;
+            if (ball.y + BALL_RADIUS >= binFloor && ball.active) {
+                const binIdx = getBinIndex(ball.x);
+                if (binIdx >= 0 && binIdx < bins.length) {
+                    bins[binIdx]++;
+                }
+                ball.active = false;
+            }
+
+            // remove if far below screen
+            if (ball.y > canvas.height + 30) {
+                ball.active = false;
+            }
+        }
+
+        // --- drawing ---
+        function drawPegs() {
+            for (const peg of pegs) {
+                ctx.beginPath();
+                ctx.arc(peg.x, peg.y, PEG_RADIUS, 0, Math.PI * 2);
+                ctx.fillStyle = '#c8d0e0';
+                ctx.shadowColor = '#8090c0';
+                ctx.shadowBlur = 5;
+                ctx.fill();
+                ctx.strokeStyle = '#4a5568';
+                ctx.lineWidth = 1.2;
+                ctx.stroke();
+            }
+            ctx.shadowBlur = 0;
+        }
+
+        function drawBins() {
+            const binFloor = PEG_TOP + pegRows * PEG_VERTICAL_SPACING + PEG_BOTTOM_MARGIN;
+            const binTop = binFloor;
+            const binBottom = binFloor + BIN_HEIGHT;
+
+            // draw bin backgrounds
+            for (let i = 0; i < bins.length; i++) {
+                const x0 = binDividers[i];
+                const x1 = binDividers[i + 1];
+                ctx.fillStyle = '#1e2535';
+                ctx.fillRect(x0, binTop, x1 - x0, BIN_HEIGHT);
+                ctx.strokeStyle = '#3a455e';
+                ctx.lineWidth = 1;
+                ctx.strokeRect(x0, binTop, x1 - x0, BIN_HEIGHT);
+
+                // draw stacked balls in bins (simplified as count indicator)
+                const count = bins[i];
+                if (count > 0) {
+                    const displayCount = Math.min(count, 70);
+                    const ballVisRadius = 3.2;
+                    const cols = Math.ceil(Math.sqrt(displayCount * (x1 - x0) / (ballVisRadius * 2.5)));
+                    const rows_needed = Math.ceil(displayCount / Math.max(1, Math.floor((x1 - x0) / (ballVisRadius * 2.3))));
+                    let drawn = 0;
+                    const maxCols = Math.max(1, Math.floor((x1 - x0) / (ballVisRadius * 2.3)));
+                    for (let r = 0; r < rows_needed && drawn < displayCount; r++) {
+                        const colsThisRow = Math.min(maxCols, displayCount - drawn);
+                        const rowWidth = colsThisRow * ballVisRadius * 2.3;
+                        const startX = (x0 + x1) / 2 - rowWidth / 2 + ballVisRadius * 1.15;
+                        for (let c = 0; c < colsThisRow && drawn < displayCount; c++) {
+                            const bx = startX + c * ballVisRadius * 2.3;
+                            const by = binBottom - 8 - r * ballVisRadius * 2.2;
+                            ctx.beginPath();
+                            ctx.arc(bx, by, ballVisRadius, 0, Math.PI * 2);
+                            ctx.fillStyle = '#e8b87a';
+                            ctx.fill();
+                            drawn++;
+                        }
+                    }
+                }
+            }
+
+            // draw divider lines
+            ctx.strokeStyle = '#6b7da0';
+            ctx.lineWidth = 2;
+            for (const divX of binDividers) {
+                ctx.beginPath();
+                ctx.moveTo(divX, binTop);
+                ctx.lineTo(divX, binBottom);
+                ctx.stroke();
+            }
+        }
+
+        function drawNormalCurve() {
+            if (totalBallsDropped < 5) return;
+
+            const binFloor = PEG_TOP + pegRows * PEG_VERTICAL_SPACING + PEG_BOTTOM_MARGIN;
+            const binTop = binFloor;
+
+            // compute bin centers
+            const binCenters = [];
+            const binCounts = [];
+            for (let i = 0; i < bins.length; i++) {
+                binCenters.push((binDividers[i] + binDividers[i + 1]) / 2);
+                binCounts.push(bins[i]);
+            }
+
+            const totalInBins = binCounts.reduce((a, b) => a + b, 0);
+            if (totalInBins === 0) return;
+
+            // weighted mean
+            let mean = 0;
+            for (let i = 0; i < bins.length; i++) {
+                mean += binCenters[i] * binCounts[i];
+            }
+            mean /= totalInBins;
+
+            // weighted standard deviation
+            let variance = 0;
+            for (let i = 0; i < bins.length; i++) {
+                variance += binCounts[i] * (binCenters[i] - mean) ** 2;
+            }
+            variance /= totalInBins;
+            const stdDev = Math.sqrt(variance) || PEG_HORIZONTAL_SPACING * Math.sqrt(pegRows) * 0.5;
+
+            // scale factor to match max bin height
+            const maxCount = Math.max(...binCounts, 1);
+            const theoreticalMax = totalInBins / (stdDev * Math.sqrt(2 * Math.PI)) * PEG_HORIZONTAL_SPACING;
+
+            // draw normal curve
+            ctx.beginPath();
+            ctx.strokeStyle = '#ff8866';
+            ctx.lineWidth = 2.8;
+            ctx.shadowColor = '#ff5522';
+            ctx.shadowBlur = 10;
+            ctx.globalAlpha = 0.9;
+
+            const curveYBase = binTop - 5;
+            const amplitude = maxCount * (PEG_HORIZONTAL_SPACING / (stdDev * Math.sqrt(2 * Math.PI)));
+            const scaleFactor = maxCount / Math.max(amplitude / (PEG_HORIZONTAL_SPACING), 0.001);
+
+            let firstPoint = true;
+            for (let x = binDividers[0] - 10; x <= binDividers[binDividers.length - 1] + 10; x += 2) {
+                const z = (x - mean) / stdDev;
+                const density = Math.exp(-0.5 * z * z);
+                const curveY = curveYBase - density * maxCount * 0.9;
+                if (firstPoint) {
+                    ctx.moveTo(x, curveY);
+                    firstPoint = false;
+                } else {
+                    ctx.lineTo(x, curveY);
+                }
+            }
+            ctx.stroke();
+            ctx.shadowBlur = 0;
+            ctx.globalAlpha = 1;
+        }
+
+        function drawBalls() {
+            for (const ball of balls) {
+                if (!ball.active) continue;
+                ctx.beginPath();
+                ctx.arc(ball.x, ball.y, BALL_RADIUS, 0, Math.PI * 2);
+                ctx.fillStyle = '#f5c27b';
+                ctx.shadowColor = '#d08030';
+                ctx.shadowBlur = 7;
+                ctx.fill();
+                ctx.strokeStyle = '#fff6e8';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+            }
+            ctx.shadowBlur = 0;
+        }
+
+        function drawBackground() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // subtle grid
+            ctx.strokeStyle = '#252d3d';
+            ctx.lineWidth = 0.5;
+            for (let y = 0; y < canvas.height; y += 35) {
+                ctx.beginPath();
+                ctx.moveTo(0, y);
+                ctx.lineTo(canvas.width, y);
+                ctx.stroke();
+            }
+
+            // drop zone indicator
+            const maxPegsInRow = pegRows;
+            const totalWidth = (maxPegsInRow - 1) * PEG_HORIZONTAL_SPACING;
+            const startX = canvas.width / 2 - totalWidth / 2;
+            ctx.fillStyle = '#2a3145';
+            ctx.fillRect(startX - 15, BOARD_TOP - 18, totalWidth + 30, 22);
+            ctx.strokeStyle = '#556080';
+            ctx.lineWidth = 1.5;
+            ctx.strokeRect(startX - 15, BOARD_TOP - 18, totalWidth + 30, 22);
+            ctx.fillStyle = '#8899bb';
+            ctx.font = '10px system-ui';
+            ctx.textAlign = 'center';
+            ctx.fillText('drop zone', canvas.width / 2, BOARD_TOP - 4);
+        }
+
+        function render() {
+            drawBackground();
+            drawPegs();
+            drawBins();
+            drawNormalCurve();
+            drawBalls();
+        }
+
+        // --- main loop ---
+        let lastTime = performance.now();
+
+        function gameLoop(timestamp) {
+            let dt = (timestamp - lastTime) / 1000;
+            if (dt > 0.1) dt = 0.1; // cap to avoid jumps
+            if (dt <= 0) dt = 0.016;
+            lastTime = timestamp;
+
+            // spawn balls based on drop rate
+            spawnAccumulator += dt * dropRate;
+            while (spawnAccumulator >= 1.0) {
+                spawnBall();
+                spawnAccumulator -= 1.0;
+            }
+
+            // sub-step physics for stability
+            const subSteps = 3;
+            const subDt = dt / subSteps;
+            for (let s = 0; s < subSteps; s++) {
+                for (const ball of balls) {
+                    if (ball.active) {
+                        updateBall(ball, subDt);
+                    }
+                }
+            }
+
+            // clean up inactive balls (keep array manageable)
+            balls = balls.filter(b => b.active || b.y < canvas.height + 30);
+            if (balls.length > 400) {
+                balls = balls.slice(-350);
+            }
+
+            updateLabels();
+            render();
+            requestAnimationFrame(gameLoop);
+        }
+
+        // --- event listeners ---
+        rowsSlider.addEventListener('input', () => {
+            pegRows = parseInt(rowsSlider.value);
+            computePegLayout(pegRows);
+            computeBins(pegRows);
+            // clear balls and bins when changing rows
+            balls = [];
+            bins = new Array(pegRows + 1).fill(0);
+            totalBallsDropped = 0;
+            spawnAccumulator = 0;
+            updateLabels();
+        });
+
+        rateSlider.addEventListener('input', () => {
+            dropRate = parseFloat(rateSlider.value);
+            updateLabels();
+        });
+
+        document.getElementById('resetButton').addEventListener('click', () => {
+            resetSimulation();
+        });
+
+        // --- initialize ---
+        function init() {
+            pegRows = parseInt(rowsSlider.value);
+            dropRate = parseFloat(rateSlider.value);
+            computePegLayout(pegRows);
+            computeBins(pegRows);
+            balls = [];
+            totalBallsDropped = 0;
+            spawnAccumulator = 0;
+            updateLabels();
+            requestAnimationFrame(gameLoop);
+        }
+
+        init();
+    })();
+</script>
+</body>
+</html>

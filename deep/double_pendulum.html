@@ -1,0 +1,569 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+  <title>chaotic double pendulum · lagrangian · rk4</title>
+  <style>
+    * {
+      margin: 0;
+      box-sizing: border-box;
+    }
+    body {
+      background: #1a1e2b;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      margin: 0;
+      padding: 20px;
+    }
+    .container {
+      background: #0b0e14;
+      border-radius: 2.2rem;
+      padding: 1.8rem 2rem 2rem 2rem;
+      box-shadow: 0 25px 45px rgba(0,0,0,0.7), inset 0 1px 1px rgba(255,255,255,0.1);
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: center;
+      gap: 2rem;
+    }
+    canvas {
+      background: radial-gradient(circle at 30% 30%, #1e2537, #0a0c14);
+      border-radius: 2rem;
+      box-shadow: 0 0 30px rgba(0,180,255,0.2), inset 0 0 20px #000000;
+      display: block;
+      width: 100%;
+      max-width: 550px;
+      height: auto;
+      aspect-ratio: 1 / 1;
+    }
+    .panel {
+      background: #151a24;
+      border-radius: 1.8rem;
+      padding: 1.5rem 1.5rem;
+      color: #cdd6f0;
+      display: flex;
+      flex-direction: column;
+      gap: 1.4rem;
+      min-width: 240px;
+      box-shadow: inset 0 2px 6px rgba(0,0,0,0.6), 0 15px 25px rgba(0,0,0,0.6);
+      border: 1px solid #2e3648;
+    }
+    .panel h3 {
+      font-weight: 400;
+      font-size: 1.3rem;
+      letter-spacing: 1px;
+      color: #a8c1ff;
+      margin: 0 0 0.2rem 0;
+      border-bottom: 1px solid #2d364a;
+      padding-bottom: 0.4rem;
+    }
+    .slider-group {
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+    }
+    label {
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: #8e9bb5;
+      display: flex;
+      justify-content: space-between;
+    }
+    input[type="range"] {
+      width: 100%;
+      accent-color: #4f9fcf;
+      background: #1e2530;
+      height: 6px;
+      border-radius: 10px;
+    }
+    .value-display {
+      font-weight: 600;
+      color: #dce3ff;
+    }
+    .energy-box {
+      background: #0f131c;
+      border-radius: 1.2rem;
+      padding: 0.8rem 1rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      font-size: 1rem;
+      border: 1px solid #3b4358;
+    }
+    .energy-label {
+      color: #90a0c0;
+    }
+    #energyValue {
+      font-family: 'Fira Code', monospace;
+      font-weight: 600;
+      font-size: 1.15rem;
+      color: #c7e9ff;
+      letter-spacing: 0.4px;
+    }
+    button {
+      background: #2a3346;
+      border: none;
+      color: #eef5ff;
+      font-weight: 500;
+      padding: 0.6rem 1.2rem;
+      border-radius: 3rem;
+      font-size: 0.9rem;
+      letter-spacing: 0.4px;
+      cursor: pointer;
+      background: linear-gradient(145deg, #2d374d, #1b212f);
+      box-shadow: 0 5px 10px rgba(0,0,0,0.5);
+      border: 1px solid #3e4a60;
+      transition: all 0.2s;
+    }
+    button:hover {
+      background: #3c4865;
+      border-color: #5e75aa;
+      color: white;
+    }
+    .note {
+      font-size: 0.7rem;
+      color: #6b7896;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+<div class="container">
+  <canvas id="pendulumCanvas" width="550" height="550" aria-label="double pendulum simulation"></canvas>
+  <div class="panel">
+    <h3>⚡ double pendulum</h3>
+    <div class="slider-group">
+      <label>mass 1 <span id="m1Val" class="value-display">2.0</span> kg</label>
+      <input type="range" id="m1Slider" min="0.5" max="4.0" value="2.0" step="0.1">
+    </div>
+    <div class="slider-group">
+      <label>mass 2 <span id="m2Val" class="value-display">1.5</span> kg</label>
+      <input type="range" id="m2Slider" min="0.5" max="4.0" value="1.5" step="0.1">
+    </div>
+    <div class="slider-group">
+      <label>arm 1 <span id="L1Val" class="value-display">1.2</span> m</label>
+      <input type="range" id="L1Slider" min="0.6" max="1.8" value="1.2" step="0.05">
+    </div>
+    <div class="slider-group">
+      <label>arm 2 <span id="L2Val" class="value-display">1.0</span> m</label>
+      <input type="range" id="L2Slider" min="0.5" max="1.8" value="1.0" step="0.05">
+    </div>
+    <div class="slider-group">
+      <label>θ₁ initial <span id="th1Val" class="value-display">2.0</span> rad</label>
+      <input type="range" id="th1Slider" min="-3.14" max="3.14" value="2.0" step="0.01">
+    </div>
+    <div class="slider-group">
+      <label>θ₂ initial <span id="th2Val" class="value-display">1.8</span> rad</label>
+      <input type="range" id="th2Slider" min="-3.14" max="3.14" value="1.8" step="0.01">
+    </div>
+    <div class="energy-box">
+      <span class="energy-label">total energy</span>
+      <span id="energyValue">0.000 J</span>
+    </div>
+    <button id="resetButton">↺ restart simulation</button>
+    <div class="note">fading trails · RK4 integrator · Lagrangian mechanics</div>
+  </div>
+</div>
+
+<script>
+  (function() {
+    // ----- physical parameters -----
+    const g = 9.81;               // m/s^2
+
+    // DOM elements
+    const canvas = document.getElementById('pendulumCanvas');
+    const ctx = canvas.getContext('2d');
+
+    // Sliders & displays
+    const m1Slider = document.getElementById('m1Slider');
+    const m2Slider = document.getElementById('m2Slider');
+    const L1Slider = document.getElementById('L1Slider');
+    const L2Slider = document.getElementById('L2Slider');
+    const th1Slider = document.getElementById('th1Slider');
+    const th2Slider = document.getElementById('th2Slider');
+
+    const m1Val = document.getElementById('m1Val');
+    const m2Val = document.getElementById('m2Val');
+    const L1Val = document.getElementById('L1Val');
+    const L2Val = document.getElementById('L2Val');
+    const th1Val = document.getElementById('th1Val');
+    const th2Val = document.getElementById('th2Val');
+    const energySpan = document.getElementById('energyValue');
+
+    // State vector: [theta1, theta2, p1, p2]  (angles in radians, conjugate momenta)
+    let state = new Float64Array(4);
+    
+    // Current parameters (updated from sliders)
+    let m1 = 2.0, m2 = 1.5, L1 = 1.2, L2 = 1.0;
+
+    // Trail storage: circular buffers for (x,y) of mass1 and mass2
+    const TRAIL_LENGTH = 180;
+    let trail1 = [];
+    let trail2 = [];
+
+    // Simulation time
+    let t = 0.0;
+    const DT = 0.008;  // fixed time step for RK4 (seconds)
+    
+    // Pivot point in canvas coordinates (center, with y down positive)
+    const pivotX = canvas.width / 2;
+    const pivotY = canvas.height * 0.28; // slightly upper part
+
+    // Scale: meters to pixels (approx 115 px per meter, keeping arms visible)
+    const PIXELS_PER_METER = 125; 
+
+    // ---- Lagrangian and equations of motion ----
+    // Generalized coordinates: θ1, θ2
+    // Lagrangian L = T - V
+    // We derive mass matrix M(θ) and forces, then solve for accelerations.
+    // Using conjugate momenta p = M * q_dot  (q = [θ1, θ2])
+    // State derivative: dθ/dt = M^{-1} * p,  dp/dt = ∂L/∂θ
+    
+    function computeDerivatives(theta1, theta2, p1, p2, m1, m2, L1, L2) {
+      const cos12 = Math.cos(theta1 - theta2);
+      const sin12 = Math.sin(theta1 - theta2);
+      
+      // Mass matrix elements (symmetric)
+      const M11 = (m1 + m2) * L1 * L1;
+      const M12 = m2 * L1 * L2 * cos12;
+      const M22 = m2 * L2 * L2;
+      
+      // Determinant of M
+      const detM = M11 * M22 - M12 * M12;
+      if (Math.abs(detM) < 1e-12) {
+        // singular configuration – return zero derivatives (should not happen with proper params)
+        return { dtheta1: 0, dtheta2: 0, dp1: 0, dp2: 0 };
+      }
+      
+      // Inverse mass matrix
+      const invM11 = M22 / detM;
+      const invM12 = -M12 / detM;
+      const invM22 = M11 / detM;
+      
+      // Compute angular velocities from momenta
+      const omega1 = invM11 * p1 + invM12 * p2;
+      const omega2 = invM12 * p1 + invM22 * p2;  // because invM21 = invM12
+      
+      // dθ/dt = omega
+      const dtheta1 = omega1;
+      const dtheta2 = omega2;
+      
+      // Compute ∂L/∂θ terms (generalized forces)
+      // ∂T/∂θ1 - ∂V/∂θ1  etc.
+      // T = 0.5 * ( (m1+m2)*L1^2 ω1^2 + m2*L2^2 ω2^2 + 2*m2*L1*L2*ω1*ω2*cos12 )
+      // ∂T/∂θ1 = - m2 * L1 * L2 * ω1 * ω2 * sin12
+      // ∂T/∂θ2 =   m2 * L1 * L2 * ω1 * ω2 * sin12
+      const dT_dtheta1 = -m2 * L1 * L2 * omega1 * omega2 * sin12;
+      const dT_dtheta2 =  m2 * L1 * L2 * omega1 * omega2 * sin12;
+      
+      // Potential energy V = - (m1+m2)*g*L1*cosθ1 - m2*g*L2*cosθ2
+      // ∂V/∂θ1 = (m1+m2)*g*L1*sinθ1
+      // ∂V/∂θ2 = m2*g*L2*sinθ2
+      const dV_dtheta1 = (m1 + m2) * g * L1 * Math.sin(theta1);
+      const dV_dtheta2 = m2 * g * L2 * Math.sin(theta2);
+      
+      // dp/dt = ∂L/∂θ = ∂T/∂θ - ∂V/∂θ
+      const dp1 = dT_dtheta1 - dV_dtheta1;
+      const dp2 = dT_dtheta2 - dV_dtheta2;
+      
+      return { dtheta1, dtheta2, dp1, dp2 };
+    }
+
+    // RK4 step
+    function rk4Step(stateVec, m1, m2, L1, L2, dt) {
+      const [th1, th2, p1, p2] = stateVec;
+      
+      // k1
+      const k1 = computeDerivatives(th1, th2, p1, p2, m1, m2, L1, L2);
+      
+      // k2
+      const th1_2 = th1 + 0.5 * dt * k1.dtheta1;
+      const th2_2 = th2 + 0.5 * dt * k1.dtheta2;
+      const p1_2  = p1  + 0.5 * dt * k1.dp1;
+      const p2_2  = p2  + 0.5 * dt * k1.dp2;
+      const k2 = computeDerivatives(th1_2, th2_2, p1_2, p2_2, m1, m2, L1, L2);
+      
+      // k3
+      const th1_3 = th1 + 0.5 * dt * k2.dtheta1;
+      const th2_3 = th2 + 0.5 * dt * k2.dtheta2;
+      const p1_3  = p1  + 0.5 * dt * k2.dp1;
+      const p2_3  = p2  + 0.5 * dt * k2.dp2;
+      const k3 = computeDerivatives(th1_3, th2_3, p1_3, p2_3, m1, m2, L1, L2);
+      
+      // k4
+      const th1_4 = th1 + dt * k3.dtheta1;
+      const th2_4 = th2 + dt * k3.dtheta2;
+      const p1_4  = p1  + dt * k3.dp1;
+      const p2_4  = p2  + dt * k3.dp2;
+      const k4 = computeDerivatives(th1_4, th2_4, p1_4, p2_4, m1, m2, L1, L2);
+      
+      // update
+      const newTh1 = th1 + (dt / 6) * (k1.dtheta1 + 2*k2.dtheta1 + 2*k3.dtheta1 + k4.dtheta1);
+      const newTh2 = th2 + (dt / 6) * (k1.dtheta2 + 2*k2.dtheta2 + 2*k3.dtheta2 + k4.dtheta2);
+      const newP1  = p1  + (dt / 6) * (k1.dp1 + 2*k2.dp1 + 2*k3.dp1 + k4.dp1);
+      const newP2  = p2  + (dt / 6) * (k1.dp2 + 2*k2.dp2 + 2*k3.dp2 + k4.dp2);
+      
+      return new Float64Array([newTh1, newTh2, newP1, newP2]);
+    }
+
+    // Compute total energy: T + V
+    function computeTotalEnergy(th1, th2, p1, p2, m1, m2, L1, L2) {
+      const cos12 = Math.cos(th1 - th2);
+      const M11 = (m1 + m2) * L1 * L1;
+      const M12 = m2 * L1 * L2 * cos12;
+      const M22 = m2 * L2 * L2;
+      const detM = M11 * M22 - M12 * M12;
+      if (Math.abs(detM) < 1e-12) return NaN;
+      
+      const invM11 = M22 / detM;
+      const invM12 = -M12 / detM;
+      const invM22 = M11 / detM;
+      
+      const omega1 = invM11 * p1 + invM12 * p2;
+      const omega2 = invM12 * p1 + invM22 * p2;
+      
+      // Kinetic energy T = 0.5 * (p1*omega1 + p2*omega2)
+      const T = 0.5 * (p1 * omega1 + p2 * omega2);
+      
+      // Potential energy V (reference: zero at theta=pi/2? using standard -mgL cos)
+      const V = - (m1 + m2) * g * L1 * Math.cos(th1) - m2 * g * L2 * Math.cos(th2);
+      
+      return T + V;
+    }
+
+    // Convert angles to canvas coordinates
+    function getMassPositions(th1, th2, L1, L2) {
+      const x1 = pivotX + L1 * Math.sin(th1) * PIXELS_PER_METER;
+      const y1 = pivotY + L1 * Math.cos(th1) * PIXELS_PER_METER;
+      const x2 = x1 + L2 * Math.sin(th2) * PIXELS_PER_METER;
+      const y2 = y1 + L2 * Math.cos(th2) * PIXELS_PER_METER;
+      return { x1, y1, x2, y2 };
+    }
+
+    // Reset state from current slider values
+    function resetState() {
+      // read parameters
+      m1 = parseFloat(m1Slider.value);
+      m2 = parseFloat(m2Slider.value);
+      L1 = parseFloat(L1Slider.value);
+      L2 = parseFloat(L2Slider.value);
+      const th1_init = parseFloat(th1Slider.value);
+      const th2_init = parseFloat(th2Slider.value);
+      
+      // Set state: initial velocities zero => momenta zero
+      state[0] = th1_init;
+      state[1] = th2_init;
+      state[2] = 0.0; // p1
+      state[3] = 0.0; // p2
+      
+      // Clear trails
+      trail1 = [];
+      trail2 = [];
+      
+      // Update display labels
+      updateLabels();
+    }
+
+    function updateLabels() {
+      m1Val.textContent = m1.toFixed(1);
+      m2Val.textContent = m2.toFixed(1);
+      L1Val.textContent = L1.toFixed(2);
+      L2Val.textContent = L2.toFixed(2);
+      th1Val.textContent = parseFloat(th1Slider.value).toFixed(2);
+      th2Val.textContent = parseFloat(th2Slider.value).toFixed(2);
+    }
+
+    // Apply slider changes to live parameters (mass/length) without resetting state.
+    // Changing mass/length while running modifies energy but keeps angles/momenta.
+    function applyParametersFromSliders() {
+      m1 = parseFloat(m1Slider.value);
+      m2 = parseFloat(m2Slider.value);
+      L1 = parseFloat(L1Slider.value);
+      L2 = parseFloat(L2Slider.value);
+      updateLabels();
+    }
+
+    // Event listeners for sliders
+    m1Slider.addEventListener('input', () => {
+      applyParametersFromSliders();
+    });
+    m2Slider.addEventListener('input', () => {
+      applyParametersFromSliders();
+    });
+    L1Slider.addEventListener('input', () => {
+      applyParametersFromSliders();
+    });
+    L2Slider.addEventListener('input', () => {
+      applyParametersFromSliders();
+    });
+    th1Slider.addEventListener('input', () => {
+      th1Val.textContent = parseFloat(th1Slider.value).toFixed(2);
+      // Do not change state until reset
+    });
+    th2Slider.addEventListener('input', () => {
+      th2Val.textContent = parseFloat(th2Slider.value).toFixed(2);
+    });
+
+    document.getElementById('resetButton').addEventListener('click', resetState);
+
+    // Drawing routines
+    function drawBackground() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      
+      // subtle pivot dot
+      ctx.beginPath();
+      ctx.arc(pivotX, pivotY, 6, 0, 2*Math.PI);
+      ctx.fillStyle = '#f0f5ff';
+      ctx.shadowColor = '#a0d0ff';
+      ctx.shadowBlur = 10;
+      ctx.fill();
+      ctx.shadowColor = 'transparent';
+      ctx.shadowBlur = 0;
+      
+      // faint grid
+      ctx.strokeStyle = '#2a3345';
+      ctx.lineWidth = 0.6;
+      for (let i = 0; i < canvas.width; i += 40) {
+        ctx.beginPath();
+        ctx.moveTo(i, 0);
+        ctx.lineTo(i, canvas.height);
+        ctx.strokeStyle = '#232b3a';
+        ctx.stroke();
+      }
+      for (let j = 0; j < canvas.height; j += 40) {
+        ctx.beginPath();
+        ctx.moveTo(0, j);
+        ctx.lineTo(canvas.width, j);
+        ctx.stroke();
+      }
+    }
+
+    function drawTrails() {
+      // trail1 (mass1)
+      if (trail1.length > 1) {
+        ctx.beginPath();
+        ctx.strokeStyle = '#f28b82';
+        ctx.lineWidth = 2.2;
+        ctx.globalAlpha = 0.75;
+        for (let i = 0; i < trail1.length - 1; i++) {
+          const p0 = trail1[i];
+          const p1 = trail1[i+1];
+          ctx.moveTo(p0.x, p0.y);
+          ctx.lineTo(p1.x, p1.y);
+        }
+        ctx.stroke();
+      }
+      
+      // trail2 (mass2)
+      if (trail2.length > 1) {
+        ctx.beginPath();
+        ctx.strokeStyle = '#aecbfa';
+        ctx.lineWidth = 2.0;
+        ctx.globalAlpha = 0.8;
+        for (let i = 0; i < trail2.length - 1; i++) {
+          const p0 = trail2[i];
+          const p1 = trail2[i+1];
+          ctx.moveTo(p0.x, p0.y);
+          ctx.lineTo(p1.x, p1.y);
+        }
+        ctx.stroke();
+        ctx.globalAlpha = 1.0;
+      }
+    }
+
+    function drawPendulumAndMasses(pos) {
+      const { x1, y1, x2, y2 } = pos;
+      
+      // Rods
+      ctx.beginPath();
+      ctx.moveTo(pivotX, pivotY);
+      ctx.lineTo(x1, y1);
+      ctx.strokeStyle = '#cdd6f0';
+      ctx.lineWidth = 2.8;
+      ctx.shadowBlur = 8;
+      ctx.shadowColor = '#3060b0';
+      ctx.stroke();
+      
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.strokeStyle = '#b0c5f0';
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+      ctx.shadowColor = 'transparent';
+      
+      // Mass 1
+      ctx.beginPath();
+      ctx.arc(x1, y1, 9, 0, 2*Math.PI);
+      ctx.fillStyle = '#f28b82';
+      ctx.shadowBlur = 12;
+      ctx.shadowColor = '#ff6b5e';
+      ctx.fill();
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 1.8;
+      ctx.stroke();
+      
+      // Mass 2
+      ctx.beginPath();
+      ctx.arc(x2, y2, 8.5, 0, 2*Math.PI);
+      ctx.fillStyle = '#aecbfa';
+      ctx.shadowColor = '#4f8cf0';
+      ctx.fill();
+      ctx.strokeStyle = '#ffffff';
+      ctx.stroke();
+      
+      ctx.shadowBlur = 0;
+      ctx.shadowColor = 'transparent';
+    }
+
+    function animationLoop() {
+      // Perform RK4 integration
+      const newState = rk4Step(state, m1, m2, L1, L2, DT);
+      state.set(newState);
+      
+      const th1 = state[0], th2 = state[1], p1 = state[2], p2 = state[3];
+      const pos = getMassPositions(th1, th2, L1, L2);
+      
+      // Update trails
+      trail1.push({ x: pos.x1, y: pos.y1 });
+      trail2.push({ x: pos.x2, y: pos.y2 });
+      if (trail1.length > TRAIL_LENGTH) trail1.shift();
+      if (trail2.length > TRAIL_LENGTH) trail2.shift();
+      
+      // Compute energy
+      const energy = computeTotalEnergy(th1, th2, p1, p2, m1, m2, L1, L2);
+      
+      // Draw everything
+      drawBackground();
+      drawTrails();
+      drawPendulumAndMasses(pos);
+      
+      // Update energy display
+      if (isNaN(energy) || !isFinite(energy)) {
+        energySpan.textContent = '--- J';
+      } else {
+        energySpan.textContent = energy.toFixed(3) + ' J';
+      }
+      
+      requestAnimationFrame(animationLoop);
+    }
+
+    // Initial setup
+    function initialise() {
+      resetState(); // sets state from sliders, clears trails
+      updateLabels();
+      // start animation
+      requestAnimationFrame(animationLoop);
+    }
+
+    initialise();
+  })();
+</script>
+</body>
+</html>

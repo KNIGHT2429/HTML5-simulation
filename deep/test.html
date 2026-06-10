@@ -1,0 +1,621 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+    <title>spinning drum · wcsph fluid</title>
+    <style>
+        * {
+            margin: 0;
+            box-sizing: border-box;
+        }
+        body {
+            background: #0d1117;
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container {
+            background: #161b24;
+            border-radius: 2rem;
+            padding: 1.5rem 1.8rem;
+            box-shadow: 0 20px 50px rgba(0, 0, 0, 0.8);
+            display: flex;
+            flex-wrap: wrap;
+            align-items: flex-start;
+            justify-content: center;
+            gap: 2rem;
+        }
+        canvas {
+            background: #0a0e14;
+            border-radius: 1.5rem;
+            box-shadow: inset 0 0 40px #000000, 0 10px 30px rgba(0,0,0,0.7);
+            display: block;
+            max-width: 100%;
+            height: auto;
+        }
+        .panel {
+            background: #1a1f2b;
+            border-radius: 1.5rem;
+            padding: 1.4rem 1.4rem;
+            color: #c5cee8;
+            display: flex;
+            flex-direction: column;
+            gap: 1.2rem;
+            min-width: 220px;
+            border: 1px solid #2d364b;
+            box-shadow: 0 12px 25px rgba(0,0,0,0.5);
+        }
+        .panel h3 {
+            font-weight: 400;
+            letter-spacing: 1px;
+            color: #8bb4f0;
+            margin: 0 0 0.2rem 0;
+            border-bottom: 1px solid #2d364f;
+            padding-bottom: 0.4rem;
+        }
+        .slider-group {
+            display: flex;
+            flex-direction: column;
+            gap: 0.3rem;
+        }
+        label {
+            font-size: 0.78rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: #8895bb;
+            display: flex;
+            justify-content: space-between;
+        }
+        input[type="range"] {
+            width: 100%;
+            accent-color: #4da6e8;
+        }
+        .value-display {
+            font-weight: 600;
+            color: #d0e0ff;
+        }
+        button {
+            background: #263040;
+            border: none;
+            color: #e0e8ff;
+            font-weight: 500;
+            padding: 0.55rem 1.1rem;
+            border-radius: 2rem;
+            cursor: pointer;
+            letter-spacing: 0.4px;
+            border: 1px solid #3d4d68;
+            transition: 0.2s;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.4);
+        }
+        button:hover {
+            background: #354868;
+            border-color: #6b8bc0;
+        }
+        .info {
+            font-size: 0.7rem;
+            color: #5e6d90;
+            text-align: center;
+            line-height: 1.4;
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <canvas id="drumCanvas" width="560" height="560" aria-label="spinning drum fluid simulation"></canvas>
+    <div class="panel">
+        <h3>💧 spinning drum</h3>
+        <div class="slider-group">
+            <label>rotation ω <span id="omegaVal" class="value-display">4.0</span> rad/s</label>
+            <input type="range" id="omegaSlider" min="0.0" max="10.0" value="4.0" step="0.1">
+        </div>
+        <div class="info" id="particleInfo">fluid particles: 0</div>
+        <button id="resetButton">↺ reset fluid</button>
+        <div class="info">wc sph · tait equation · cubic spline kernel</div>
+    </div>
+</div>
+
+<script>
+    (function() {
+        const canvas = document.getElementById('drumCanvas');
+        const ctx = canvas.getContext('2d');
+
+        const omegaSlider = document.getElementById('omegaSlider');
+        const omegaVal = document.getElementById('omegaVal');
+        const particleInfo = document.getElementById('particleInfo');
+
+        // ----- drum geometry -----
+        const CENTER_X = canvas.width / 2;
+        const CENTER_Y = canvas.height / 2;
+        const DRUM_RADIUS = 240;
+
+        // ----- SPH parameters -----
+        const H = 23;                // support radius (kernel cutoff)
+        const REST_DENSITY = 0.012;  // expected bulk SPH density with m=1
+        const STIFFNESS = 55000;     // B for Tait equation
+        const GAMMA = 7;             // Tait exponent
+        const VISCOSITY = 0.35;      // dynamic viscosity μ
+        const GRAVITY = 980;         // px/s² downward
+        const PARTICLE_MASS = 1.0;
+        const PARTICLE_SPACING = 9.8;
+        const BOUNDARY_SPACING = 7.2; // denser boundary particles
+
+        // ----- time stepping -----
+        const SUBSTEPS = 8;
+        const DT_SUB = 0.0015;       // seconds per sub-step
+
+        // ----- state -----
+        let fluidParticles = [];
+        let boundaryParticles = [];
+        let omega = 4.0;             // rad/s
+        let simTime = 0;
+
+        // ----- spatial grid -----
+        let grid = new Map();
+        const CELL_SIZE = H;
+
+        function gridKey(cx, cy) {
+            return `${cx},${cy}`;
+        }
+
+        function clearGrid() {
+            grid.clear();
+        }
+
+        function addToGrid(index, x, y) {
+            const cx = Math.floor(x / CELL_SIZE);
+            const cy = Math.floor(y / CELL_SIZE);
+            const key = gridKey(cx, cy);
+            if (!grid.has(key)) grid.set(key, []);
+            grid.get(key).push(index);
+        }
+
+        function getNeighborIndices(x, y) {
+            const cx = Math.floor(x / CELL_SIZE);
+            const cy = Math.floor(y / CELL_SIZE);
+            const neighbors = [];
+            for (let dx = -1; dx <= 1; dx++) {
+                for (let dy = -1; dy <= 1; dy++) {
+                    const key = gridKey(cx + dx, cy + dy);
+                    if (grid.has(key)) {
+                        for (const idx of grid.get(key)) {
+                            neighbors.push(idx);
+                        }
+                    }
+                }
+            }
+            return neighbors;
+        }
+
+        // ----- kernel: cubic spline (2D, Monaghan) -----
+        // W(r,h), q = r/h, support up to q=2
+        const KERNEL_NORM = 10 / (7 * Math.PI * H * H);
+        const KERNEL_GRAD_NORM = 10 / (7 * Math.PI * H * H * H);
+
+        function kernelW(r) {
+            const q = r / H;
+            if (q >= 2) return 0;
+            if (q < 1) {
+                return KERNEL_NORM * (1 - 1.5 * q * q + 0.75 * q * q * q);
+            } else {
+                return KERNEL_NORM * 0.25 * (2 - q) * (2 - q) * (2 - q);
+            }
+        }
+
+        function kernelGradMag(r) {
+            const q = r / H;
+            if (q >= 2 || r < 1e-8) return 0;
+            if (q < 1) {
+                return KERNEL_GRAD_NORM * (-3 * q + 2.25 * q * q);
+            } else {
+                return KERNEL_GRAD_NORM * (-0.75 * (2 - q) * (2 - q));
+            }
+        }
+
+        // laplacian approximation (spiky kernel laplacian, widely used)
+        function kernelLaplacian(r) {
+            if (r >= H || r < 1e-8) return 0;
+            return (45 / (Math.PI * H * H * H * H * H * H)) * (H - r);
+        }
+
+        // ----- boundary particles -----
+        function createBoundaryParticles() {
+            boundaryParticles = [];
+            const circumference = 2 * Math.PI * DRUM_RADIUS;
+            const numBoundary = Math.floor(circumference / BOUNDARY_SPACING);
+            const angleStep = (2 * Math.PI) / numBoundary;
+
+            for (let i = 0; i < numBoundary; i++) {
+                const angle = i * angleStep;
+                boundaryParticles.push({
+                    baseAngle: angle,
+                    x: CENTER_X + DRUM_RADIUS * Math.cos(angle),
+                    y: CENTER_Y + DRUM_RADIUS * Math.sin(angle),
+                    vx: 0,
+                    vy: 0,
+                    density: REST_DENSITY,
+                    pressure: 0,
+                });
+            }
+        }
+
+        function updateBoundaryParticles(dt) {
+            for (const bp of boundaryParticles) {
+                const angle = bp.baseAngle + omega * simTime;
+                bp.x = CENTER_X + DRUM_RADIUS * Math.cos(angle);
+                bp.y = CENTER_Y + DRUM_RADIUS * Math.sin(angle);
+                // tangential velocity
+                bp.vx = -omega * (bp.y - CENTER_Y);
+                bp.vy = omega * (bp.x - CENTER_X);
+            }
+        }
+
+        // ----- fluid particles -----
+        function createFluidParticles() {
+            fluidParticles = [];
+            // fill bottom portion of drum with a rectangular grid
+            const xMin = CENTER_X - 150;
+            const xMax = CENTER_X + 150;
+            const yMin = CENTER_Y + 20;
+            const yMax = CENTER_Y + DRUM_RADIUS - 40;
+            const margin = 18;
+
+            for (let y = yMin; y <= yMax; y += PARTICLE_SPACING) {
+                for (let x = xMin; x <= xMax; x += PARTICLE_SPACING) {
+                    const dx = x - CENTER_X;
+                    const dy = y - CENTER_Y;
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+                    if (dist < DRUM_RADIUS - margin) {
+                        fluidParticles.push({
+                            x: x,
+                            y: y,
+                            vx: 0,
+                            vy: 0,
+                            density: REST_DENSITY,
+                            pressure: 0,
+                        });
+                    }
+                }
+            }
+        }
+
+        // ----- build unified spatial grid -----
+        function buildGrid() {
+            clearGrid();
+            // fluid particles (indices 0..Nf-1)
+            for (let i = 0; i < fluidParticles.length; i++) {
+                addToGrid(i, fluidParticles[i].x, fluidParticles[i].y);
+            }
+            // boundary particles (indices Nf..Nf+Nb-1) — stored with offset
+            const offset = fluidParticles.length;
+            for (let i = 0; i < boundaryParticles.length; i++) {
+                addToGrid(offset + i, boundaryParticles[i].x, boundaryParticles[i].y);
+            }
+        }
+
+        // get all particles (fluid or boundary) near a given position
+        function getNearbyParticles(x, y) {
+            const indices = getNeighborIndices(x, y);
+            const result = [];
+            const nf = fluidParticles.length;
+            for (const idx of indices) {
+                if (idx < nf) {
+                    result.push({ type: 'fluid', index: idx, data: fluidParticles[idx] });
+                } else {
+                    const bIdx = idx - nf;
+                    if (bIdx < boundaryParticles.length) {
+                        result.push({ type: 'boundary', index: bIdx, data: boundaryParticles[bIdx] });
+                    }
+                }
+            }
+            return result;
+        }
+
+        // ----- compute densities -----
+        function computeDensities() {
+            // fluid particle densities
+            for (const fp of fluidParticles) {
+                fp.density = 0;
+                const neighbors = getNearbyParticles(fp.x, fp.y);
+                for (const nb of neighbors) {
+                    const dx = fp.x - nb.data.x;
+                    const dy = fp.y - nb.data.y;
+                    const r = Math.sqrt(dx * dx + dy * dy);
+                    if (r < H && r > 0.001) {
+                        fp.density += PARTICLE_MASS * kernelW(r);
+                    }
+                }
+                // include self-contribution
+                fp.density += PARTICLE_MASS * kernelW(0);
+                if (fp.density < 0.001) fp.density = 0.001;
+            }
+
+            // boundary particle densities (from fluid neighbors only)
+            for (const bp of boundaryParticles) {
+                bp.density = 0;
+                for (const fp of fluidParticles) {
+                    const dx = bp.x - fp.x;
+                    const dy = bp.y - fp.y;
+                    const r = Math.sqrt(dx * dx + dy * dy);
+                    if (r < H && r > 0.001) {
+                        bp.density += PARTICLE_MASS * kernelW(r);
+                    }
+                }
+                bp.density += PARTICLE_MASS * kernelW(0);
+                if (bp.density < REST_DENSITY) bp.density = REST_DENSITY;
+            }
+        }
+
+        // ----- compute pressures (Tait equation) -----
+        function computePressures() {
+            for (const fp of fluidParticles) {
+                const ratio = fp.density / REST_DENSITY;
+                fp.pressure = STIFFNESS * (Math.pow(ratio, GAMMA) - 1);
+                if (fp.pressure < 0) fp.pressure = 0;
+            }
+            for (const bp of boundaryParticles) {
+                const ratio = bp.density / REST_DENSITY;
+                bp.pressure = STIFFNESS * (Math.pow(ratio, GAMMA) - 1);
+                if (bp.pressure < 0) bp.pressure = 0;
+            }
+        }
+
+        // ----- compute forces on fluid particles -----
+        function computeForces() {
+            // initialize forces
+            for (const fp of fluidParticles) {
+                fp.fx = 0;
+                fp.fy = PARTICLE_MASS * GRAVITY; // gravity downward
+            }
+
+            // pressure and viscosity forces
+            for (let i = 0; i < fluidParticles.length; i++) {
+                const pi = fluidParticles[i];
+                const neighbors = getNearbyParticles(pi.x, pi.y);
+
+                for (const nb of neighbors) {
+                    const pj = nb.data;
+                    const dx = pi.x - pj.x;
+                    const dy = pi.y - pj.y;
+                    const r = Math.sqrt(dx * dx + dy * dy);
+                    if (r < 1e-6 || r >= H) continue;
+
+                    const nx = dx / r;
+                    const ny = dy / r;
+
+                    // pressure force (symmetric)
+                    const gradMag = kernelGradMag(r);
+                    const pTerm = (pi.pressure / (pi.density * pi.density) +
+                        pj.pressure / (pj.density * pj.density));
+                    const pForceMag = -PARTICLE_MASS * pTerm * gradMag;
+                    pi.fx += pForceMag * nx;
+                    pi.fy += pForceMag * ny;
+
+                    // viscosity force
+                    const dvx = pj.vx - pi.vx;
+                    const dvy = pj.vy - pi.vy;
+                    const lapVal = kernelLaplacian(r);
+                    const viscMag = VISCOSITY * PARTICLE_MASS * lapVal / pj.density;
+                    pi.fx += viscMag * dvx;
+                    pi.fy += viscMag * dvy;
+                }
+            }
+        }
+
+        // ----- integrate fluid particles (semi-implicit Euler) -----
+        function integrateFluid(dt) {
+            for (const fp of fluidParticles) {
+                const ax = fp.fx / PARTICLE_MASS;
+                const ay = fp.fy / PARTICLE_MASS;
+                fp.vx += ax * dt;
+                fp.vy += ay * dt;
+                fp.x += fp.vx * dt;
+                fp.y += fp.vy * dt;
+            }
+        }
+
+        // ----- enforce drum boundary (hard constraint) -----
+        function enforceDrumBoundary() {
+            const margin = 6;
+            const maxDist = DRUM_RADIUS - margin;
+            for (const fp of fluidParticles) {
+                const dx = fp.x - CENTER_X;
+                const dy = fp.y - CENTER_Y;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                if (dist > maxDist) {
+                    const nx = dx / dist;
+                    const ny = dy / dist;
+                    // push back inside
+                    fp.x = CENTER_X + nx * maxDist;
+                    fp.y = CENTER_Y + ny * maxDist;
+                    // reflect normal velocity component (with damping)
+                    const vn = fp.vx * nx + fp.vy * ny;
+                    if (vn > 0) {
+                        fp.vx -= 1.3 * vn * nx;
+                        fp.vy -= 1.3 * vn * ny;
+                    }
+                }
+                // also clamp if somehow outside the drum
+                if (dist > DRUM_RADIUS - 2) {
+                    const nx2 = dx / dist;
+                    const ny2 = dy / dist;
+                    fp.x = CENTER_X + nx2 * (DRUM_RADIUS - 2);
+                    fp.y = CENTER_Y + ny2 * (DRUM_RADIUS - 2);
+                }
+            }
+        }
+
+        // ----- main physics step -----
+        function physicsStep(dt) {
+            updateBoundaryParticles(dt);
+            buildGrid();
+            computeDensities();
+            computePressures();
+            computeForces();
+            integrateFluid(dt);
+            enforceDrumBoundary();
+            simTime += dt;
+        }
+
+        // ----- rendering -----
+        function drawDrum() {
+            // drum interior
+            ctx.beginPath();
+            ctx.arc(CENTER_X, CENTER_Y, DRUM_RADIUS, 0, Math.PI * 2);
+            ctx.fillStyle = '#111820';
+            ctx.fill();
+
+            // drum rim
+            ctx.beginPath();
+            ctx.arc(CENTER_X, CENTER_Y, DRUM_RADIUS, 0, Math.PI * 2);
+            ctx.strokeStyle = '#5a7088';
+            ctx.lineWidth = 6;
+            ctx.shadowColor = '#3060a0';
+            ctx.shadowBlur = 18;
+            ctx.stroke();
+            ctx.shadowBlur = 0;
+            ctx.shadowColor = 'transparent';
+
+            // inner ring
+            ctx.beginPath();
+            ctx.arc(CENTER_X, CENTER_Y, DRUM_RADIUS - 4, 0, Math.PI * 2);
+            ctx.strokeStyle = '#3d5068';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            // center cross
+            ctx.strokeStyle = '#2a3548';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(CENTER_X - 14, CENTER_Y);
+            ctx.lineTo(CENTER_X + 14, CENTER_Y);
+            ctx.moveTo(CENTER_X, CENTER_Y - 14);
+            ctx.lineTo(CENTER_X, CENTER_Y + 14);
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.arc(CENTER_X, CENTER_Y, 5, 0, Math.PI * 2);
+            ctx.fillStyle = '#889aaa';
+            ctx.fill();
+        }
+
+        function drawFluidParticles() {
+            for (const fp of fluidParticles) {
+                const speed = Math.sqrt(fp.vx * fp.vx + fp.vy * fp.vy);
+                const maxSpeed = 400;
+                const t = Math.min(speed / maxSpeed, 1.0);
+
+                // blue -> cyan -> white gradient based on speed
+                const r = Math.floor(60 + t * 180);
+                const g = Math.floor(120 + t * 120);
+                const b = Math.floor(200 + t * 55);
+                const alpha = 0.7 + t * 0.3;
+
+                ctx.beginPath();
+                ctx.arc(fp.x, fp.y, 4.8, 0, Math.PI * 2);
+                ctx.fillStyle = `rgba(${r},${g},${b},${alpha})`;
+                ctx.fill();
+                ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+                ctx.lineWidth = 0.7;
+                ctx.stroke();
+            }
+        }
+
+        function drawBoundaryParticles() {
+            for (const bp of boundaryParticles) {
+                ctx.beginPath();
+                ctx.arc(bp.x, bp.y, 3.2, 0, Math.PI * 2);
+                ctx.fillStyle = '#7a8ba0';
+                ctx.fill();
+            }
+        }
+
+        function render() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // subtle background grid
+            ctx.strokeStyle = '#1a2230';
+            ctx.lineWidth = 0.4;
+            for (let y = 0; y < canvas.height; y += 30) {
+                ctx.beginPath();
+                ctx.moveTo(0, y);
+                ctx.lineTo(canvas.width, y);
+                ctx.stroke();
+            }
+            for (let x = 0; x < canvas.width; x += 30) {
+                ctx.beginPath();
+                ctx.moveTo(x, 0);
+                ctx.lineTo(x, canvas.height);
+                ctx.stroke();
+            }
+
+            drawDrum();
+            drawBoundaryParticles();
+            drawFluidParticles();
+
+            // info overlay
+            particleInfo.textContent = `fluid particles: ${fluidParticles.length}`;
+        }
+
+        // ----- main loop -----
+        let lastFrameTime = performance.now();
+        let accumulator = 0;
+
+        function gameLoop(timestamp) {
+            let frameDt = (timestamp - lastFrameTime) / 1000;
+            if (frameDt > 0.1) frameDt = 0.1;
+            if (frameDt <= 0) frameDt = 0.016;
+            lastFrameTime = timestamp;
+
+            accumulator += frameDt;
+            const totalSubDt = SUBSTEPS * DT_SUB;
+
+            while (accumulator >= totalSubDt) {
+                for (let s = 0; s < SUBSTEPS; s++) {
+                    physicsStep(DT_SUB);
+                }
+                accumulator -= totalSubDt;
+            }
+
+            render();
+            requestAnimationFrame(gameLoop);
+        }
+
+        // ----- reset -----
+        function resetSimulation() {
+            simTime = 0;
+            omega = parseFloat(omegaSlider.value);
+            createBoundaryParticles();
+            createFluidParticles();
+            updateLabels();
+        }
+
+        function updateLabels() {
+            omegaVal.textContent = omega.toFixed(1);
+            particleInfo.textContent = `fluid particles: ${fluidParticles.length}`;
+        }
+
+        // ----- event listeners -----
+        omegaSlider.addEventListener('input', () => {
+            omega = parseFloat(omegaSlider.value);
+            updateLabels();
+        });
+
+        document.getElementById('resetButton').addEventListener('click', resetSimulation);
+
+        // ----- initialize -----
+        function init() {
+            omega = parseFloat(omegaSlider.value);
+            createBoundaryParticles();
+            createFluidParticles();
+            updateLabels();
+            requestAnimationFrame(gameLoop);
+        }
+
+        init();
+    })();
+</script>
+</body>
+</html>
