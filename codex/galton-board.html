@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Galton Board</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, Segoe UI, system-ui, sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: grid; grid-template-columns: 300px 1fr; background: #111416; color: #f2f5f3; }
+    aside { padding: 20px; background: #191f22; border-right: 1px solid #2e383c; }
+    canvas { width: 100%; height: 100vh; display: block; background: linear-gradient(#0e1315, #151a1a); }
+    h1 { margin: 0 0 10px; font-size: 22px; }
+    p { margin: 0 0 18px; color: #a9b7b6; line-height: 1.45; font-size: 13px; }
+    label { display: grid; gap: 7px; margin: 16px 0; font-size: 13px; }
+    input { width: 100%; accent-color: #7ddc91; }
+    .row { display: flex; justify-content: space-between; color: #c8d3d1; font-variant-numeric: tabular-nums; }
+    button { width: 100%; margin-top: 10px; padding: 10px 12px; color: #f2f5f3; background: #253238; border: 1px solid #415158; border-radius: 7px; cursor: pointer; }
+    button:hover { background: #304047; }
+    .stat { margin-top: 18px; padding: 12px; border: 1px solid #2e383c; border-radius: 8px; background: #121719; font-variant-numeric: tabular-nums; }
+    @media (max-width: 760px) { body { grid-template-columns: 1fr; } canvas { height: 66vh; } aside { border-right: 0; border-bottom: 1px solid #2e383c; } }
+  </style>
+</head>
+<body>
+  <aside>
+    <h1>Galton Board</h1>
+    <p>Balls fall under gravity and bounce off pegs with restitution. Outcomes emerge from contact geometry and tiny launch jitter, never a left/right coin flip.</p>
+    <label><span class="row"><b>Peg rows</b><span id="rowsv"></span></span><input id="rows" type="range" min="5" max="14" step="1" value="10"></label>
+    <label><span class="row"><b>Drop rate</b><span id="ratev"></span></span><input id="rate" type="range" min="1" max="45" step="1" value="18"></label>
+    <button id="clear">Clear balls and bins</button>
+    <div class="stat">
+      <div class="row"><span>Dropped</span><b id="dropped">0</b></div>
+      <div class="row"><span>Settled</span><b id="settled">0</b></div>
+    </div>
+  </aside>
+  <canvas id="c"></canvas>
+  <script>
+    const canvas = document.getElementById("c"), ctx = canvas.getContext("2d");
+    const rowsEl = document.getElementById("rows"), rateEl = document.getElementById("rate");
+    const rowsv = document.getElementById("rowsv"), ratev = document.getElementById("ratev");
+    const droppedEl = document.getElementById("dropped"), settledEl = document.getElementById("settled");
+    let pegs = [], bins = [], balls = [], dropped = 0, settled = 0, spawnAcc = 0, last = performance.now();
+    const ballR = 6, pegR = 5, rest = 0.72, gravity = 1450;
+
+    function layout() {
+      const rows = +rowsEl.value, w = canvas.clientWidth, h = canvas.clientHeight;
+      rowsv.textContent = rows; ratev.textContent = rateEl.value + "/s";
+      pegs = [];
+      const spacing = Math.min(w / (rows + 3), h * 0.06);
+      const top = h * 0.13, cx = w / 2;
+      for (let r = 0; r < rows; r++) {
+        for (let i = 0; i <= r; i++) {
+          pegs.push({x: cx + (i - r / 2) * spacing, y: top + r * spacing * 0.88});
+        }
+      }
+      bins = Array.from({length: rows + 1}, (_, i) => bins[i] || 0);
+    }
+    function reset() { balls = []; bins = Array(+rowsEl.value + 1).fill(0); dropped = settled = spawnAcc = 0; layout(); }
+    function spawn() {
+      const jitter = (Math.random() - 0.5) * 1.8;
+      balls.push({x: canvas.clientWidth / 2 + jitter, y: 18, vx: jitter * 4, vy: 0});
+      dropped++;
+    }
+    function step(dt) {
+      spawnAcc += dt * +rateEl.value;
+      while (spawnAcc >= 1) { spawn(); spawnAcc--; }
+      const rows = +rowsEl.value, w = canvas.clientWidth, h = canvas.clientHeight;
+      const binTop = h * 0.78, binW = w / (rows + 1);
+      for (const b of balls) {
+        b.vy += gravity * dt;
+        b.x += b.vx * dt; b.y += b.vy * dt;
+        if (b.x < ballR) { b.x = ballR; b.vx = Math.abs(b.vx) * rest; }
+        if (b.x > w - ballR) { b.x = w - ballR; b.vx = -Math.abs(b.vx) * rest; }
+        for (const p of pegs) {
+          const dx = b.x - p.x, dy = b.y - p.y, d = Math.hypot(dx, dy), minD = ballR + pegR;
+          if (d > 0 && d < minD) {
+            const nx = dx / d, ny = dy / d, overlap = minD - d;
+            b.x += nx * overlap; b.y += ny * overlap;
+            const vn = b.vx * nx + b.vy * ny;
+            if (vn < 0) {
+              b.vx -= (1 + rest) * vn * nx;
+              b.vy -= (1 + rest) * vn * ny;
+              b.vx += (Math.random() - 0.5) * 2.2;
+            }
+          }
+        }
+        if (b.y > binTop && b.y < h - 25) b.vx *= Math.pow(0.985, dt * 60);
+      }
+      balls = balls.filter(b => {
+        if (b.y < h + 40) return true;
+        const idx = Math.max(0, Math.min(rows, Math.floor(b.x / binW)));
+        bins[idx]++; settled++; return false;
+      });
+      droppedEl.textContent = dropped; settledEl.textContent = settled;
+    }
+    function normal(x, mu, sigma) { return Math.exp(-0.5 * ((x - mu) / sigma) ** 2) / (sigma * Math.sqrt(2 * Math.PI)); }
+    function draw() {
+      const w = canvas.clientWidth, h = canvas.clientHeight, rows = +rowsEl.value;
+      ctx.clearRect(0, 0, w, h);
+      ctx.strokeStyle = "#344349"; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(w/2 - 36, 0); ctx.lineTo(w/2 - 10, 70); ctx.moveTo(w/2 + 36, 0); ctx.lineTo(w/2 + 10, 70); ctx.stroke();
+      ctx.fillStyle = "#d8e4e1";
+      for (const p of pegs) { ctx.beginPath(); ctx.arc(p.x, p.y, pegR, 0, Math.PI*2); ctx.fill(); }
+      const binTop = h * 0.78, binW = w / (rows + 1), maxBin = Math.max(1, ...bins);
+      ctx.strokeStyle = "#5b696e"; ctx.lineWidth = 1.5;
+      for (let i = 0; i <= rows + 1; i++) { const x = i * binW; ctx.beginPath(); ctx.moveTo(x, binTop); ctx.lineTo(x, h); ctx.stroke(); }
+      for (let i = 0; i < bins.length; i++) {
+        const bh = (h - binTop - 18) * bins[i] / maxBin;
+        ctx.fillStyle = "#7ddc91"; ctx.fillRect(i * binW + 4, h - bh, binW - 8, bh);
+      }
+      if (settled > 5) {
+        const mu = rows / 2, sigma = Math.sqrt(rows * 0.25), area = settled * binW;
+        ctx.strokeStyle = "#ffd166"; ctx.lineWidth = 3; ctx.beginPath();
+        for (let px = 0; px <= w; px++) {
+          const x = px / binW, y = h - normal(x, mu, sigma) * area * (h - binTop) / maxBin;
+          if (px === 0) ctx.moveTo(px, y); else ctx.lineTo(px, y);
+        }
+        ctx.stroke();
+      }
+      ctx.fillStyle = "#79c7ff";
+      for (const b of balls) { ctx.beginPath(); ctx.arc(b.x, b.y, ballR, 0, Math.PI*2); ctx.fill(); }
+    }
+    function resize() {
+      const dpr = Math.max(1, Math.min(2, devicePixelRatio || 1));
+      canvas.width = Math.floor(canvas.clientWidth * dpr); canvas.height = Math.floor(canvas.clientHeight * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0); layout();
+    }
+    function loop(now) {
+      const dt = Math.min(0.025, (now - last) / 1000); last = now;
+      for (let i = 0; i < 3; i++) step(dt / 3);
+      draw(); requestAnimationFrame(loop);
+    }
+    rowsEl.oninput = reset; rateEl.oninput = layout; document.getElementById("clear").onclick = reset;
+    addEventListener("resize", resize); resize(); reset(); requestAnimationFrame(loop);
+  </script>
+</body>
+</html>

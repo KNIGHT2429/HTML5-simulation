@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WCSPH Spinning Drum</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, Segoe UI, system-ui, sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: grid; grid-template-columns: 320px 1fr; background: #121514; color: #f2f7f5; }
+    aside { padding: 20px; background: #19201e; border-right: 1px solid #303c38; overflow: auto; }
+    canvas { width: 100%; height: 100vh; display: block; background: radial-gradient(circle at center, #172321, #0d1110 74%); }
+    h1 { margin: 0 0 10px; font-size: 22px; }
+    p { margin: 0 0 18px; color: #a9b8b3; line-height: 1.45; font-size: 13px; }
+    label { display: grid; gap: 7px; margin: 16px 0; font-size: 13px; }
+    input { width: 100%; accent-color: #57c7df; }
+    .row { display: flex; justify-content: space-between; color: #c8d5d1; font-variant-numeric: tabular-nums; }
+    button { width: 100%; margin-top: 10px; padding: 10px 12px; color: #f2f7f5; background: #233231; border: 1px solid #42514d; border-radius: 7px; cursor: pointer; }
+    .meter { margin-top: 18px; padding: 12px; border: 1px solid #303c38; border-radius: 8px; background: #121817; font-variant-numeric: tabular-nums; }
+    @media (max-width: 800px) { body { grid-template-columns: 1fr; } aside { border-right: 0; border-bottom: 1px solid #303c38; } canvas { height: 65vh; } }
+  </style>
+</head>
+<body>
+  <aside>
+    <h1>Spinning Drum WCSPH</h1>
+    <p>Weakly compressible SPH with poly6 density, spiky pressure gradient, viscosity Laplacian, Tait pressure, and rotating no-slip wall impulses.</p>
+    <label><span class="row"><b>Drum speed</b><span id="speedv"></span></span><input id="speed" type="range" min="-4" max="4" step="0.05" value="1.15"></label>
+    <label><span class="row"><b>Viscosity</b><span id="viscv"></span></span><input id="visc" type="range" min="0.02" max="1.2" step="0.02" value="0.32"></label>
+    <button id="reset">Reset water</button>
+    <div class="meter">
+      <div class="row"><span>Particles</span><b id="count"></b></div>
+      <div class="row"><span>Mean density</span><b id="rho"></b></div>
+    </div>
+  </aside>
+  <canvas id="c"></canvas>
+  <script>
+    const canvas = document.getElementById("c"), ctx = canvas.getContext("2d");
+    const speed = document.getElementById("speed"), visc = document.getElementById("visc");
+    const speedv = document.getElementById("speedv"), viscv = document.getElementById("viscv");
+    const countEl = document.getElementById("count"), rhoEl = document.getElementById("rho");
+    const N = 310, h = 18, mass = 28, rho0 = 1.0, gamma = 7, stiffness = 950, gravity = 1250;
+    const poly6 = 4 / (Math.PI * h ** 8), spiky = -30 / (Math.PI * h ** 5), visclap = 20 / (3 * Math.PI * h ** 5);
+    let particles = [], grid = new Map(), last = performance.now(), angle = 0;
+
+    function reset() {
+      particles = [];
+      const R = drum().r, cx = drum().x, cy = drum().y;
+      const startX = cx - R * 0.52, startY = cy - R * 0.48, gap = 10;
+      for (let y = 0; y < 28 && particles.length < N; y++) {
+        for (let x = 0; x < 18 && particles.length < N; x++) {
+          const px = startX + x * gap + (y % 2) * gap * 0.5, py = startY + y * gap;
+          if (Math.hypot(px - cx, py - cy) < R - 22) particles.push({x:px, y:py, vx:0, vy:0, rho:rho0, p:0, ax:0, ay:0});
+        }
+      }
+    }
+    function drum() {
+      const w = canvas.clientWidth, hgt = canvas.clientHeight;
+      return {x:w/2, y:hgt/2, r:Math.min(w, hgt) * 0.41};
+    }
+    function key(x, y) { return Math.floor(x / h) + "," + Math.floor(y / h); }
+    function rebuild() {
+      grid.clear();
+      for (let i = 0; i < particles.length; i++) {
+        const k = key(particles[i].x, particles[i].y);
+        if (!grid.has(k)) grid.set(k, []);
+        grid.get(k).push(i);
+      }
+    }
+    function neighbors(p) {
+      const gx = Math.floor(p.x / h), gy = Math.floor(p.y / h), out = [];
+      for (let y = -1; y <= 1; y++) for (let x = -1; x <= 1; x++) {
+        const cell = grid.get((gx + x) + "," + (gy + y));
+        if (cell) out.push(...cell);
+      }
+      return out;
+    }
+    function compute() {
+      rebuild();
+      let sumRho = 0;
+      for (const pi of particles) {
+        pi.rho = 0;
+        for (const j of neighbors(pi)) {
+          const pj = particles[j], dx = pi.x - pj.x, dy = pi.y - pj.y, r2 = dx*dx + dy*dy;
+          if (r2 < h*h) pi.rho += mass * poly6 * (h*h - r2) ** 3;
+        }
+        pi.rho = Math.max(0.72, pi.rho);
+        pi.p = stiffness * ((pi.rho / rho0) ** gamma - 1);
+        sumRho += pi.rho;
+      }
+      for (const pi of particles) {
+        pi.ax = 0; pi.ay = gravity;
+        for (const j of neighbors(pi)) {
+          const pj = particles[j]; if (pi === pj) continue;
+          const dx = pi.x - pj.x, dy = pi.y - pj.y, r = Math.hypot(dx, dy);
+          if (r > 0 && r < h) {
+            const nx = dx / r, ny = dy / r, q = h - r;
+            const grad = spiky * q * q;
+            const press = -mass * (pi.p + pj.p) / (2 * pj.rho) * grad;
+            const lap = visclap * q;
+            pi.ax += press * nx + (+visc.value) * mass * (pj.vx - pi.vx) / pj.rho * lap;
+            pi.ay += press * ny + (+visc.value) * mass * (pj.vy - pi.vy) / pj.rho * lap;
+          }
+        }
+      }
+      rhoEl.textContent = (sumRho / particles.length).toFixed(3);
+    }
+    function wall(dt) {
+      const d = drum(), omega = +speed.value;
+      for (const p of particles) {
+        const dx = p.x - d.x, dy = p.y - d.y, r = Math.hypot(dx, dy), maxR = d.r - 7;
+        if (r > maxR) {
+          const nx = dx / r, ny = dy / r, tx = -ny, ty = nx;
+          p.x = d.x + nx * maxR; p.y = d.y + ny * maxR;
+          const wallVx = tx * omega * maxR, wallVy = ty * omega * maxR;
+          const rvx = p.vx - wallVx, rvy = p.vy - wallVy;
+          const vn = rvx * nx + rvy * ny, vt = rvx * tx + rvy * ty;
+          if (vn > 0) { p.vx -= 1.55 * vn * nx; p.vy -= 1.55 * vn * ny; }
+          p.vx += (-vt * 0.12) * tx + (wallVx - p.vx) * 0.018;
+          p.vy += (-vt * 0.12) * ty + (wallVy - p.vy) * 0.018;
+        }
+      }
+    }
+    function step(dt) {
+      compute();
+      for (const p of particles) {
+        p.vx += p.ax * dt; p.vy += p.ay * dt;
+        const v = Math.hypot(p.vx, p.vy), vmax = 850;
+        if (v > vmax) { p.vx *= vmax / v; p.vy *= vmax / v; }
+        p.x += p.vx * dt; p.y += p.vy * dt;
+      }
+      wall(dt);
+      angle += +speed.value * dt;
+      speedv.textContent = (+speed.value).toFixed(2) + " rad/s";
+      viscv.textContent = (+visc.value).toFixed(2);
+      countEl.textContent = particles.length;
+    }
+    function draw() {
+      const d = drum();
+      ctx.clearRect(0, 0, canvas.clientWidth, canvas.clientHeight);
+      ctx.save(); ctx.translate(d.x, d.y); ctx.rotate(angle);
+      ctx.strokeStyle = "#40524d"; ctx.lineWidth = 18; ctx.beginPath(); ctx.arc(0, 0, d.r, 0, Math.PI*2); ctx.stroke();
+      ctx.strokeStyle = "#77928b"; ctx.lineWidth = 3;
+      for (let a = 0; a < Math.PI*2; a += Math.PI/4) { ctx.beginPath(); ctx.moveTo(Math.cos(a)*(d.r-26), Math.sin(a)*(d.r-26)); ctx.lineTo(Math.cos(a)*(d.r-8), Math.sin(a)*(d.r-8)); ctx.stroke(); }
+      ctx.restore();
+      ctx.globalCompositeOperation = "lighter";
+      for (const p of particles) {
+        const t = Math.max(0, Math.min(1, (p.rho - 0.8) / 0.55));
+        ctx.fillStyle = `rgb(${50 + t*40}, ${150 + t*70}, ${210 + t*35})`;
+        ctx.beginPath(); ctx.arc(p.x, p.y, 6.7, 0, Math.PI*2); ctx.fill();
+      }
+      ctx.globalCompositeOperation = "source-over";
+    }
+    function resize() {
+      const dpr = Math.max(1, Math.min(2, devicePixelRatio || 1));
+      canvas.width = Math.floor(canvas.clientWidth * dpr); canvas.height = Math.floor(canvas.clientHeight * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0); reset();
+    }
+    function loop(now) {
+      const dt = Math.min(0.018, (now - last) / 1000); last = now;
+      const sub = 3, hdt = dt / sub;
+      for (let i = 0; i < sub; i++) step(hdt);
+      draw(); requestAnimationFrame(loop);
+    }
+    document.getElementById("reset").onclick = reset;
+    addEventListener("resize", resize); resize(); reset(); requestAnimationFrame(loop);
+  </script>
+</body>
+</html>

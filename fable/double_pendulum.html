@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chaotic Double Pendulum — Lagrangian + RK4</title>
+<style>
+  :root {
+    --bg: #0b0e17;
+    --panel: #12172391;
+    --ink: #d7dce6;
+    --dim: #6b7488;
+    --amber: #ffb347;
+    --cyan: #5fd3e8;
+    --line: #232a3a;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: ui-monospace, "SF Mono", "Cascadia Mono", Consolas, monospace;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 18px 14px 30px;
+  }
+  h1 { font-size: 15px; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink); }
+  .sub { font-size: 11px; color: var(--dim); margin: 4px 0 14px; letter-spacing: 0.04em; }
+  .wrap { display: flex; gap: 18px; flex-wrap: wrap; justify-content: center; align-items: flex-start; }
+  canvas { background: radial-gradient(ellipse at 50% 28%, #101524 0%, #0b0e17 70%); border: 1px solid var(--line); border-radius: 10px; max-width: 100%; height: auto; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 16px 18px; width: 270px; backdrop-filter: blur(4px);
+  }
+  .panel h2 { font-size: 10px; letter-spacing: 0.18em; color: var(--dim); text-transform: uppercase; margin-bottom: 10px; }
+  .ctl { margin-bottom: 11px; }
+  .ctl label { display: flex; justify-content: space-between; font-size: 11.5px; margin-bottom: 4px; }
+  .ctl label b { font-weight: 400; color: var(--dim); }
+  .ctl .v1 { color: var(--amber); } .ctl .v2 { color: var(--cyan); }
+  input[type=range] { width: 100%; accent-color: #8fa3c8; height: 18px; }
+  .btns { display: flex; gap: 8px; margin-top: 6px; }
+  button {
+    flex: 1; background: #1a2233; color: var(--ink); border: 1px solid #2c3650;
+    border-radius: 6px; padding: 7px 0; font: inherit; font-size: 12px; cursor: pointer;
+  }
+  button:hover { background: #232e46; }
+  button:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+  .energy { margin-top: 16px; border-top: 1px solid var(--line); padding-top: 12px; font-size: 12px; line-height: 1.85; }
+  .energy .row { display: flex; justify-content: space-between; }
+  .energy .row span:first-child { color: var(--dim); }
+  .drift-ok { color: #7fe0a0; } .drift-bad { color: #ff7a7a; }
+  .note { margin-top: 12px; font-size: 10.5px; color: var(--dim); line-height: 1.6; }
+</style>
+</head>
+<body>
+<h1>Double Pendulum</h1>
+<div class="sub">Euler–Lagrange equations of motion · 4th-order Runge–Kutta · dt = 1 ms</div>
+<div class="wrap">
+  <canvas id="c" width="680" height="640"></canvas>
+  <div class="panel">
+    <h2>Parameters · changes restart</h2>
+    <div class="ctl"><label><b>mass m₁</b><span class="v1" id="vm1"></span></label>
+      <input type="range" id="m1" min="0.2" max="5" step="0.1" value="1.5" aria-label="mass 1"></div>
+    <div class="ctl"><label><b>mass m₂</b><span class="v2" id="vm2"></span></label>
+      <input type="range" id="m2" min="0.2" max="5" step="0.1" value="1.0" aria-label="mass 2"></div>
+    <div class="ctl"><label><b>length l₁</b><span class="v1" id="vl1"></span></label>
+      <input type="range" id="l1" min="0.3" max="1.6" step="0.05" value="1.0" aria-label="length 1"></div>
+    <div class="ctl"><label><b>length l₂</b><span class="v2" id="vl2"></span></label>
+      <input type="range" id="l2" min="0.3" max="1.6" step="0.05" value="0.8" aria-label="length 2"></div>
+    <div class="ctl"><label><b>angle θ₁</b><span class="v1" id="va1"></span></label>
+      <input type="range" id="a1" min="-180" max="180" step="1" value="120" aria-label="initial angle 1"></div>
+    <div class="ctl"><label><b>angle θ₂</b><span class="v2" id="va2"></span></label>
+      <input type="range" id="a2" min="-180" max="180" step="1" value="-35" aria-label="initial angle 2"></div>
+    <div class="ctl"><label><b>sim speed</b><span id="vsp"></span></label>
+      <input type="range" id="sp" min="0.25" max="2" step="0.25" value="1" aria-label="simulation speed"></div>
+    <div class="btns">
+      <button id="restart">Restart</button>
+      <button id="pause">Pause</button>
+    </div>
+    <div class="energy">
+      <div class="row"><span>kinetic T</span><span id="ke">—</span></div>
+      <div class="row"><span>potential V</span><span id="pe">—</span></div>
+      <div class="row"><span>total E</span><span id="te">—</span></div>
+      <div class="row"><span>drift ΔE/E₀</span><span id="dr">—</span></div>
+    </div>
+    <div class="note">Total energy should hold to better than 10⁻⁶ — the test that the Lagrangian
+    derivation and the RK4 step are both right. Angles are measured from straight down.</div>
+  </div>
+</div>
+
+<script>
+'use strict';
+/* ---------------------------------------------------------------------------
+   Dynamics, from the Lagrangian  L = T − V  with generalized coords θ1, θ2
+   (measured from the downward vertical):
+
+     x1 = l1 sinθ1            y1 = −l1 cosθ1
+     x2 = x1 + l2 sinθ2       y2 = y1 − l2 cosθ2
+
+     T = ½ m1 l1² θ̇1² + ½ m2 [ l1² θ̇1² + l2² θ̇2² + 2 l1 l2 θ̇1 θ̇2 cos(θ1−θ2) ]
+     V = −(m1+m2) g l1 cosθ1 − m2 g l2 cosθ2
+
+   d/dt(∂L/∂θ̇k) − ∂L/∂θk = 0 gives two coupled ODEs; solved for the angular
+   accelerations they reduce to the closed forms below.
+--------------------------------------------------------------------------- */
+const g = 9.81;
+const P = { m1: 1.5, m2: 1.0, l1: 1.0, l2: 0.8 };
+
+function deriv(s, out) {
+  const a1 = s[0], a2 = s[1], w1 = s[2], w2 = s[3];
+  const d = a1 - a2, cd = Math.cos(d), sd = Math.sin(d);
+  const den = 2 * P.m1 + P.m2 - P.m2 * Math.cos(2 * d);
+  out[0] = w1;
+  out[1] = w2;
+  out[2] = (-g * (2 * P.m1 + P.m2) * Math.sin(a1)
+            - P.m2 * g * Math.sin(a1 - 2 * a2)
+            - 2 * sd * P.m2 * (w2 * w2 * P.l2 + w1 * w1 * P.l1 * cd))
+           / (P.l1 * den);
+  out[3] = (2 * sd * (w1 * w1 * P.l1 * (P.m1 + P.m2)
+            + g * (P.m1 + P.m2) * Math.cos(a1)
+            + w2 * w2 * P.l2 * P.m2 * cd))
+           / (P.l2 * den);
+}
+
+// classic RK4, preallocated scratch (no GC churn in the hot loop)
+const k1 = new Float64Array(4), k2 = new Float64Array(4),
+      k3 = new Float64Array(4), k4 = new Float64Array(4),
+      tmp = new Float64Array(4);
+function rk4(s, dt) {
+  deriv(s, k1);
+  for (let i = 0; i < 4; i++) tmp[i] = s[i] + 0.5 * dt * k1[i];
+  deriv(tmp, k2);
+  for (let i = 0; i < 4; i++) tmp[i] = s[i] + 0.5 * dt * k2[i];
+  deriv(tmp, k3);
+  for (let i = 0; i < 4; i++) tmp[i] = s[i] + dt * k3[i];
+  deriv(tmp, k4);
+  for (let i = 0; i < 4; i++) s[i] += dt / 6 * (k1[i] + 2 * k2[i] + 2 * k3[i] + k4[i]);
+}
+
+function energies(s) {
+  const a1 = s[0], a2 = s[1], w1 = s[2], w2 = s[3];
+  const T = 0.5 * P.m1 * P.l1 * P.l1 * w1 * w1
+          + 0.5 * P.m2 * (P.l1 * P.l1 * w1 * w1 + P.l2 * P.l2 * w2 * w2
+            + 2 * P.l1 * P.l2 * w1 * w2 * Math.cos(a1 - a2));
+  const V = -(P.m1 + P.m2) * g * P.l1 * Math.cos(a1) - P.m2 * g * P.l2 * Math.cos(a2);
+  return [T, V];
+}
+
+/* ---------------------------- simulation state --------------------------- */
+const DT = 0.001;                 // physics step (s)
+let state = new Float64Array(4);
+let E0 = 0, paused = false, acc = 0, lastT = 0;
+const TRAIL = 700;
+const trail1 = [], trail2 = [];
+
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const ids = ['m1','m2','l1','l2','a1','a2','sp'];
+const el = {}; ids.forEach(id => el[id] = document.getElementById(id));
+const out = {}; ['vm1','vm2','vl1','vl2','va1','va2','vsp','ke','pe','te','dr']
+  .forEach(id => out[id] = document.getElementById(id));
+
+function readControls() {
+  P.m1 = +el.m1.value; P.m2 = +el.m2.value;
+  P.l1 = +el.l1.value; P.l2 = +el.l2.value;
+  out.vm1.textContent = P.m1.toFixed(1) + ' kg';
+  out.vm2.textContent = P.m2.toFixed(1) + ' kg';
+  out.vl1.textContent = P.l1.toFixed(2) + ' m';
+  out.vl2.textContent = P.l2.toFixed(2) + ' m';
+  out.va1.textContent = el.a1.value + '°';
+  out.va2.textContent = el.a2.value + '°';
+  out.vsp.textContent = (+el.sp.value).toFixed(2) + '×';
+}
+
+function restart() {
+  readControls();
+  state[0] = +el.a1.value * Math.PI / 180;
+  state[1] = +el.a2.value * Math.PI / 180;
+  state[2] = 0; state[3] = 0;
+  const [T, V] = energies(state);
+  E0 = T + V;
+  trail1.length = 0; trail2.length = 0;
+  acc = 0;
+}
+
+ids.forEach(id => el[id].addEventListener('input', () => {
+  if (id === 'sp') { readControls(); return; }
+  restart();
+}));
+document.getElementById('restart').addEventListener('click', restart);
+const pauseBtn = document.getElementById('pause');
+pauseBtn.addEventListener('click', () => {
+  paused = !paused;
+  pauseBtn.textContent = paused ? 'Resume' : 'Pause';
+});
+
+/* -------------------------------- drawing -------------------------------- */
+function positions() {
+  const x1 = P.l1 * Math.sin(state[0]), y1 = P.l1 * Math.cos(state[0]);
+  return [x1, y1, x1 + P.l2 * Math.sin(state[1]), y1 + P.l2 * Math.cos(state[1])];
+}
+
+function drawTrail(pts, r, gCol, b) {
+  for (let i = 1; i < pts.length; i++) {
+    const a = i / pts.length;
+    ctx.strokeStyle = `rgba(${r},${gCol},${b},${(a * a * 0.85).toFixed(3)})`;
+    ctx.lineWidth = 0.6 + 1.7 * a;
+    ctx.beginPath();
+    ctx.moveTo(pts[i - 1][0], pts[i - 1][1]);
+    ctx.lineTo(pts[i][0], pts[i][1]);
+    ctx.stroke();
+  }
+}
+
+function frame(t) {
+  requestAnimationFrame(frame);
+  if (!lastT) lastT = t;
+  let real = Math.min((t - lastT) / 1000, 0.05);
+  lastT = t;
+
+  if (!paused) {
+    acc += real * (+el.sp.value);
+    let n = 0;
+    while (acc >= DT && n < 120) { rk4(state, DT); acc -= DT; n++; }
+    const [x1, y1, x2, y2] = positions();
+    const px = cv.width / 2, py = cv.height * 0.38;
+    const scale = Math.min(cv.width, cv.height) * 0.46 / (P.l1 + P.l2);
+    trail1.push([px + x1 * scale, py + y1 * scale]);
+    trail2.push([px + x2 * scale, py + y2 * scale]);
+    if (trail1.length > TRAIL) trail1.shift();
+    if (trail2.length > TRAIL) trail2.shift();
+  }
+
+  // scene
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  const px = cv.width / 2, py = cv.height * 0.38;
+  const scale = Math.min(cv.width, cv.height) * 0.46 / (P.l1 + P.l2);
+  const [x1, y1, x2, y2] = positions();
+  const X1 = px + x1 * scale, Y1 = py + y1 * scale;
+  const X2 = px + x2 * scale, Y2 = py + y2 * scale;
+
+  drawTrail(trail1, 255, 179, 71);   // amber  — m1
+  drawTrail(trail2, 95, 211, 232);   // cyan   — m2
+
+  // rods
+  ctx.strokeStyle = '#9aa6bd'; ctx.lineWidth = 2; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(X1, Y1); ctx.lineTo(X2, Y2); ctx.stroke();
+
+  // pivot
+  ctx.fillStyle = '#3a4459';
+  ctx.beginPath(); ctx.arc(px, py, 5, 0, 7); ctx.fill();
+  ctx.strokeStyle = '#586585'; ctx.stroke();
+
+  // masses (radius ∝ m^⅓)
+  const r1 = 7 + 6 * Math.cbrt(P.m1), r2 = 7 + 6 * Math.cbrt(P.m2);
+  ctx.fillStyle = '#ffb347';
+  ctx.beginPath(); ctx.arc(X1, Y1, r1, 0, 7); ctx.fill();
+  ctx.fillStyle = '#5fd3e8';
+  ctx.beginPath(); ctx.arc(X2, Y2, r2, 0, 7); ctx.fill();
+
+  // energy readout
+  const [T, V] = energies(state);
+  out.ke.textContent = T.toFixed(3) + ' J';
+  out.pe.textContent = V.toFixed(3) + ' J';
+  out.te.textContent = (T + V).toFixed(5) + ' J';
+  const drift = Math.abs(E0) > 1e-12 ? (T + V - E0) / Math.abs(E0) : 0;
+  out.dr.textContent = drift.toExponential(2);
+  out.dr.className = Math.abs(drift) < 1e-4 ? 'drift-ok' : 'drift-bad';
+}
+
+restart();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chaotic Double Pendulum</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, Segoe UI, system-ui, sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: grid; grid-template-columns: 320px 1fr; background: #101316; color: #eef3f6; }
+    aside { padding: 20px; background: #171d21; border-right: 1px solid #2b343a; overflow: auto; }
+    main { position: relative; min-width: 0; }
+    canvas { display: block; width: 100%; height: 100vh; background: radial-gradient(circle at 50% 45%, #1f292d 0, #0d1012 72%); }
+    h1 { margin: 0 0 10px; font-size: 22px; letter-spacing: 0; }
+    p { color: #aebbc2; line-height: 1.45; font-size: 13px; margin: 0 0 18px; }
+    label { display: grid; gap: 7px; margin: 15px 0; color: #dbe5e9; font-size: 13px; }
+    input[type="range"] { width: 100%; accent-color: #64d2b3; }
+    .row { display: flex; justify-content: space-between; gap: 12px; color: #91a4ad; font-variant-numeric: tabular-nums; }
+    .energy { margin-top: 18px; padding: 12px; border: 1px solid #2d3b41; border-radius: 8px; background: #11171a; font-variant-numeric: tabular-nums; }
+    button { width: 100%; margin-top: 10px; border: 1px solid #405057; background: #223039; color: #eef3f6; border-radius: 7px; padding: 10px 12px; cursor: pointer; }
+    button:hover { background: #2a3b45; }
+    .note { position: absolute; right: 16px; bottom: 14px; color: #8fa0a7; font-size: 12px; pointer-events: none; }
+    @media (max-width: 800px) { body { grid-template-columns: 1fr; grid-template-rows: auto 1fr; } aside { border-right: 0; border-bottom: 1px solid #2b343a; } canvas { height: 62vh; } }
+  </style>
+</head>
+<body>
+  <aside>
+    <h1>Double Pendulum</h1>
+    <p>Equations come from the two-link Lagrangian with point masses. Time integration uses fixed-step RK4; trails fade to reveal sensitivity to initial conditions.</p>
+    <label><span class="row"><b>Mass 1</b><span id="m1v"></span></span><input id="m1" type="range" min="0.2" max="5" step="0.1" value="1"></label>
+    <label><span class="row"><b>Mass 2</b><span id="m2v"></span></span><input id="m2" type="range" min="0.2" max="5" step="0.1" value="1"></label>
+    <label><span class="row"><b>Arm 1</b><span id="l1v"></span></span><input id="l1" type="range" min="70" max="240" step="1" value="160"></label>
+    <label><span class="row"><b>Arm 2</b><span id="l2v"></span></span><input id="l2" type="range" min="70" max="240" step="1" value="160"></label>
+    <label><span class="row"><b>Initial angle 1</b><span id="a1v"></span></span><input id="a1" type="range" min="-180" max="180" step="1" value="120"></label>
+    <label><span class="row"><b>Initial angle 2</b><span id="a2v"></span></span><input id="a2" type="range" min="-180" max="180" step="1" value="-20"></label>
+    <button id="reset">Reset simulation</button>
+    <button id="kick">Tiny perturbation</button>
+    <div class="energy">
+      <div class="row"><span>Total energy</span><b id="energy"></b></div>
+      <div class="row"><span>Drift</span><b id="drift"></b></div>
+    </div>
+  </aside>
+  <main>
+    <canvas id="c"></canvas>
+    <div class="note">RK4, dt = 1/240 s</div>
+  </main>
+  <script>
+    const canvas = document.getElementById("c");
+    const ctx = canvas.getContext("2d");
+    const ids = ["m1","m2","l1","l2","a1","a2"];
+    const el = Object.fromEntries(ids.map(id => [id, document.getElementById(id)]));
+    const out = Object.fromEntries(ids.map(id => [id, document.getElementById(id + "v")]));
+    const energyEl = document.getElementById("energy");
+    const driftEl = document.getElementById("drift");
+    const g = 9.81, dt = 1 / 240;
+    let state, initialEnergy = 0, trail1 = [], trail2 = [], last = performance.now(), acc = 0;
+
+    function params() {
+      return {
+        m1: +el.m1.value, m2: +el.m2.value,
+        l1: +el.l1.value / 100, l2: +el.l2.value / 100
+      };
+    }
+    function reset() {
+      state = [deg(+el.a1.value), deg(+el.a2.value), 0, 0];
+      initialEnergy = energy(state);
+      trail1 = []; trail2 = [];
+      updateLabels();
+    }
+    function deg(v) { return v * Math.PI / 180; }
+    function updateLabels() {
+      out.m1.textContent = (+el.m1.value).toFixed(1) + " kg";
+      out.m2.textContent = (+el.m2.value).toFixed(1) + " kg";
+      out.l1.textContent = el.l1.value + " px";
+      out.l2.textContent = el.l2.value + " px";
+      out.a1.textContent = el.a1.value + " deg";
+      out.a2.textContent = el.a2.value + " deg";
+    }
+
+    function deriv(s) {
+      const [t1, t2, w1, w2] = s;
+      const {m1, m2, l1, l2} = params();
+      const d = t1 - t2;
+      const den = 2 * m1 + m2 - m2 * Math.cos(2 * d);
+      const a1 = (
+        -g * (2 * m1 + m2) * Math.sin(t1)
+        - m2 * g * Math.sin(t1 - 2 * t2)
+        - 2 * Math.sin(d) * m2 * (w2*w2*l2 + w1*w1*l1*Math.cos(d))
+      ) / (l1 * den);
+      const a2 = (
+        2 * Math.sin(d) * (
+          w1*w1*l1*(m1+m2) + g*(m1+m2)*Math.cos(t1) + w2*w2*l2*m2*Math.cos(d)
+        )
+      ) / (l2 * den);
+      return [w1, w2, a1, a2];
+    }
+    function rk4(s, h) {
+      const k1 = deriv(s);
+      const k2 = deriv(s.map((v, i) => v + k1[i] * h / 2));
+      const k3 = deriv(s.map((v, i) => v + k2[i] * h / 2));
+      const k4 = deriv(s.map((v, i) => v + k3[i] * h));
+      return s.map((v, i) => v + h * (k1[i] + 2*k2[i] + 2*k3[i] + k4[i]) / 6);
+    }
+    function energy(s) {
+      const [t1, t2, w1, w2] = s;
+      const {m1, m2, l1, l2} = params();
+      const y1 = -l1 * Math.cos(t1), y2 = y1 - l2 * Math.cos(t2);
+      const T = 0.5*m1*l1*l1*w1*w1 + 0.5*m2*(l1*l1*w1*w1 + l2*l2*w2*w2 + 2*l1*l2*w1*w2*Math.cos(t1-t2));
+      const V = m1*g*y1 + m2*g*y2;
+      return T + V;
+    }
+    function positions() {
+      const scale = Math.min(canvas.width, canvas.height) * 0.25;
+      const {l1, l2} = params();
+      const ox = canvas.width / 2, oy = canvas.height * 0.34;
+      const x1 = ox + Math.sin(state[0]) * l1 * scale;
+      const y1 = oy + Math.cos(state[0]) * l1 * scale;
+      const x2 = x1 + Math.sin(state[1]) * l2 * scale;
+      const y2 = y1 + Math.cos(state[1]) * l2 * scale;
+      return {ox, oy, x1, y1, x2, y2};
+    }
+    function drawTrail(points, color) {
+      for (let i = 1; i < points.length; i++) {
+        ctx.globalAlpha = i / points.length * 0.7;
+        ctx.strokeStyle = color;
+        ctx.beginPath();
+        ctx.moveTo(points[i-1].x, points[i-1].y);
+        ctx.lineTo(points[i].x, points[i].y);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+    }
+    function draw() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const p = positions();
+      trail1.push({x:p.x1, y:p.y1}); trail2.push({x:p.x2, y:p.y2});
+      if (trail1.length > 650) trail1.shift();
+      if (trail2.length > 650) trail2.shift();
+      ctx.lineWidth = 2;
+      drawTrail(trail1, "#77d9ff"); drawTrail(trail2, "#f3bd5a");
+      ctx.strokeStyle = "#d5e4e9"; ctx.lineWidth = 4; ctx.lineCap = "round";
+      ctx.beginPath(); ctx.moveTo(p.ox, p.oy); ctx.lineTo(p.x1, p.y1); ctx.lineTo(p.x2, p.y2); ctx.stroke();
+      ctx.fillStyle = "#e9f7fb"; ctx.beginPath(); ctx.arc(p.ox, p.oy, 6, 0, Math.PI*2); ctx.fill();
+      const {m1, m2} = params();
+      ctx.fillStyle = "#77d9ff"; ctx.beginPath(); ctx.arc(p.x1, p.y1, 8 + m1 * 2.2, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle = "#f3bd5a"; ctx.beginPath(); ctx.arc(p.x2, p.y2, 8 + m2 * 2.2, 0, Math.PI*2); ctx.fill();
+      const E = energy(state), drift = E - initialEnergy;
+      energyEl.textContent = E.toFixed(5) + " J";
+      driftEl.textContent = drift.toExponential(2);
+    }
+    function resize() {
+      const dpr = Math.max(1, Math.min(2, devicePixelRatio || 1));
+      canvas.width = Math.floor(canvas.clientWidth * dpr);
+      canvas.height = Math.floor(canvas.clientHeight * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      canvas.width = canvas.clientWidth * dpr;
+      canvas.height = canvas.clientHeight * dpr;
+    }
+    function loop(now) {
+      acc += Math.min(0.05, (now - last) / 1000); last = now;
+      while (acc >= dt) { state = rk4(state, dt); acc -= dt; }
+      draw(); requestAnimationFrame(loop);
+    }
+    ids.forEach(id => el[id].addEventListener("input", reset));
+    document.getElementById("reset").onclick = reset;
+    document.getElementById("kick").onclick = () => { state[0] += 1e-5; trail1 = []; trail2 = []; };
+    addEventListener("resize", resize);
+    resize(); reset(); requestAnimationFrame(loop);
+  </script>
+</body>
+</html>

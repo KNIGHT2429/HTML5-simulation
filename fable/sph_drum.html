@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Water in a Spinning Drum — WCSPH</title>
+<style>
+  :root {
+    --bg: #061224;
+    --panel: #0c1c33cc;
+    --ink: #cfe2f5;
+    --dim: #5d7693;
+    --accent: #66d9ff;
+    --line: #1a3050;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: radial-gradient(ellipse at 50% 0%, #0a1a30 0%, #061224 65%);
+    color: var(--ink);
+    font-family: ui-monospace, "SF Mono", "Cascadia Mono", Consolas, monospace;
+    min-height: 100vh; display: flex; flex-direction: column; align-items: center;
+    padding: 18px 14px 30px;
+  }
+  h1 { font-size: 15px; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; }
+  .sub { font-size: 11px; color: var(--dim); margin: 4px 0 14px; letter-spacing: 0.03em; }
+  .wrap { display: flex; gap: 18px; flex-wrap: wrap; justify-content: center; align-items: flex-start; }
+  canvas { background: transparent; max-width: 100%; height: auto; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+           padding: 16px 18px; width: 270px; backdrop-filter: blur(4px); }
+  .panel h2 { font-size: 10px; letter-spacing: 0.18em; color: var(--dim); text-transform: uppercase; margin-bottom: 12px; }
+  .ctl { margin-bottom: 13px; }
+  .ctl label { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 4px; }
+  .ctl label b { font-weight: 400; color: var(--dim); }
+  .ctl label span { color: var(--accent); font-variant-numeric: tabular-nums; }
+  input[type=range] { width: 100%; accent-color: #66d9ff; height: 18px; }
+  .btns { display: flex; gap: 8px; margin-top: 4px; }
+  button { flex: 1; background: #14304f; color: var(--ink); border: 1px solid #265079; border-radius: 6px;
+           padding: 7px 0; font: inherit; font-size: 12px; cursor: pointer; }
+  button:hover { background: #1b3d63; }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .stats { margin-top: 16px; border-top: 1px solid var(--line); padding-top: 12px; font-size: 12px; line-height: 1.9; }
+  .stats .row { display: flex; justify-content: space-between; }
+  .stats .row span:first-child { color: var(--dim); }
+  .note { margin-top: 12px; font-size: 10.5px; color: var(--dim); line-height: 1.6; }
+</style>
+</head>
+<body>
+<h1>Water in a Spinning Drum</h1>
+<div class="sub">Weakly compressible SPH · Tait equation of state · poly6 / spiky / viscosity kernels</div>
+<div class="wrap">
+  <canvas id="c" width="700" height="700"></canvas>
+  <div class="panel">
+    <h2>Controls</h2>
+    <div class="ctl"><label><b>drum rotation ω</b><span id="vom"></span></label>
+      <input type="range" id="om" min="-6" max="6" step="0.1" value="0" aria-label="drum rotation speed"></div>
+    <div class="ctl"><label><b>water fill</b><span id="vfill"></span></label>
+      <input type="range" id="fill" min="20" max="60" step="5" value="40" aria-label="water fill percent"></div>
+    <div class="ctl"><label><b>viscosity μ</b><span id="vmu"></span></label>
+      <input type="range" id="mu" min="0.05" max="0.6" step="0.01" value="0.18" aria-label="viscosity"></div>
+    <div class="btns">
+      <button id="reset">Reset water</button>
+      <button id="pause">Pause</button>
+    </div>
+    <div class="stats">
+      <div class="row"><span>particles</span><span id="snum">—</span></div>
+      <div class="row"><span>mean ρ / ρ₀</span><span id="srho">—</span></div>
+      <div class="row"><span>max |v|</span><span id="svel">—</span></div>
+      <div class="row"><span>fps</span><span id="sfps">—</span></div>
+    </div>
+    <div class="note">
+      Pressure from the Tait equation p = B[(ρ/ρ₀)⁷ − 1]; the no-slip wall drags the water with
+      the drum. Slow spin tilts the surface; past ω² R ≈ g (~2.9 rad/s here) the water climbs the
+      wall and centrifuges into an annulus. Try reversing the direction suddenly.
+    </div>
+  </div>
+</div>
+
+<script>
+'use strict';
+/* ---------------------------------------------------------------------------
+   2-D weakly compressible SPH (WCSPH)
+
+   density   ρi = Σj m W_poly6(rij)            W_poly6 = 4/(πh⁸)(h²−r²)³
+   pressure  pi = B[(ρi/ρ0)^7 − 1]  (Tait EOS, B = ρ0 c²/7), clamped ≥ 0
+   pressure force  −Σj m (pi/ρi² + pj/ρj²) ∇W_spiky,   ∇W_spiky = −30/(πh⁵)(h−r)² r̂
+   viscosity        μ Σj (m/ρj)(vj−vi) ∇²W_visc / ρi,  ∇²W_visc = 40/(πh⁵)(h−r)
+   + weak pairwise cohesion at r > 0.6h (surface tension) and XSPH smoothing
+   integration: symplectic Euler, dt = 1.2 ms (CFL-safe for c = 20 m/s)
+   boundary: project to the drum circle; reflect damped normal velocity and
+   relax tangential velocity toward the wall speed ω·R (no-slip drag)
+--------------------------------------------------------------------------- */
+const R = 1.2;                       // drum inner radius (m)
+const dx = 0.055;                    // particle spacing (m)
+const h = 0.11, h2 = h * h;          // smoothing radius
+const rho0 = 1000;
+const mass = rho0 * dx * dx;
+const cs = 20;                       // numerical speed of sound
+const B = rho0 * cs * cs / 7;        // Tait stiffness
+const XSPH = 0.5;
+const COH = 3.0;                     // cohesion strength
+const GRAV = 9.81;
+const DT = 0.0012;
+const SUB = 6;                       // substeps per frame
+const rb = dx * 0.5;                 // particle "radius" at the wall
+
+const POLY6  = 4 / (Math.PI * Math.pow(h, 8));
+const SPIKYG = -30 / (Math.PI * Math.pow(h, 5));
+const VISCL  = 40 / (Math.PI * Math.pow(h, 5));
+
+let n = 0;
+let px, py, vx, vy, rho, pr, ax, ay, xvx, xvy;
+let omega = 0, drumAngle = 0, paused = false, mu = 0.18;
+
+function init() {
+  const fillFrac = (+fillEl.value) / 100;
+  // fill the lowest part of the drum with a lattice covering ~fillFrac of its area
+  // solve for the chord height: area of circular segment = fillFrac * πR²
+  let lo = -R, hi = R, yCut = 0;
+  for (let it = 0; it < 50; it++) {
+    yCut = (lo + hi) / 2;
+    const t = Math.max(-1, Math.min(1, yCut / R));
+    const below = R * R * (Math.acos(-t) + t * Math.sqrt(1 - t * t)); // circle area below y = yCut
+    (below / (Math.PI * R * R) < fillFrac) ? lo = yCut : hi = yCut;
+  }
+  const P = [];
+  for (let y = -R; y <= yCut; y += dx)
+    for (let x = -R; x <= R; x += dx)
+      if (x * x + y * y < (R - rb - 0.01) ** 2) P.push([x, y]);
+  n = P.length;
+  px = new Float64Array(n); py = new Float64Array(n);
+  vx = new Float64Array(n); vy = new Float64Array(n);
+  rho = new Float64Array(n); pr = new Float64Array(n);
+  ax = new Float64Array(n); ay = new Float64Array(n);
+  xvx = new Float64Array(n); xvy = new Float64Array(n);
+  for (let i = 0; i < n; i++) { px[i] = P[i][0]; py[i] = P[i][1]; }
+  snum.textContent = n;
+}
+
+/* spatial hash grid, rebuilt each substep */
+const cell = h;
+function hkey(i, j) { return (i * 73856093) ^ (j * 19349663); }
+function buildGrid() {
+  const g = new Map();
+  for (let i = 0; i < n; i++) {
+    const k = hkey(Math.floor(px[i] / cell), Math.floor(py[i] / cell));
+    let a = g.get(k); if (!a) { a = []; g.set(k, a); } a.push(i);
+  }
+  return g;
+}
+
+function step() {
+  const g = buildGrid();
+
+  // pass 1: density and Tait pressure
+  for (let i = 0; i < n; i++) {
+    let d = 0;
+    const ci = Math.floor(px[i] / cell), cj = Math.floor(py[i] / cell);
+    for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) {
+      const arr = g.get(hkey(ci + a, cj + b));
+      if (!arr) continue;
+      for (let q = 0; q < arr.length; q++) {
+        const j = arr[q];
+        const rx = px[i] - px[j], ry = py[i] - py[j];
+        const r2 = rx * rx + ry * ry;
+        if (r2 < h2) { const t = h2 - r2; d += mass * POLY6 * t * t * t; }
+      }
+    }
+    rho[i] = Math.max(d, rho0 * 0.5);
+    pr[i] = Math.max(0, B * (Math.pow(rho[i] / rho0, 7) - 1));
+  }
+
+  // pass 2: pressure + viscosity + cohesion forces, XSPH correction
+  for (let i = 0; i < n; i++) {
+    let fx = 0, fy = -GRAV, sx = 0, sy = 0;
+    const ci = Math.floor(px[i] / cell), cj = Math.floor(py[i] / cell);
+    for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) {
+      const arr = g.get(hkey(ci + a, cj + b));
+      if (!arr) continue;
+      for (let q = 0; q < arr.length; q++) {
+        const j = arr[q];
+        if (j === i) continue;
+        const rx = px[i] - px[j], ry = py[i] - py[j];
+        const r2 = rx * rx + ry * ry;
+        if (r2 >= h2 || r2 < 1e-12) continue;
+        const r = Math.sqrt(r2);
+        // symmetric pressure force (spiky gradient)
+        const w = SPIKYG * (h - r) * (h - r) / r;
+        const pterm = -mass * (pr[i] / (rho[i] * rho[i]) + pr[j] / (rho[j] * rho[j]));
+        fx += pterm * w * rx;
+        fy += pterm * w * ry;
+        // viscosity (laplacian kernel)
+        const vc = mu * mass / rho[j] * VISCL * (h - r) / rho[i];
+        fx += vc * (vx[j] - vx[i]);
+        fy += vc * (vy[j] - vy[i]);
+        const wp = POLY6 * (h2 - r2) ** 3;
+        // weak cohesion only at the outer shell of the kernel (surface tension)
+        if (r > 0.6 * h) {
+          const kc = COH * mass * wp;
+          fx -= kc * rx / r;
+          fy -= kc * ry / r;
+        }
+        // XSPH velocity smoothing
+        const c = mass / (0.5 * (rho[i] + rho[j])) * wp;
+        sx += c * (vx[j] - vx[i]);
+        sy += c * (vy[j] - vy[i]);
+      }
+    }
+    ax[i] = fx; ay[i] = fy; xvx[i] = sx; xvy[i] = sy;
+  }
+
+  // pass 3: integrate + rotating no-slip boundary
+  const Rin = R - rb;
+  const drag = 1 - Math.exp(-100 * DT);
+  for (let i = 0; i < n; i++) {
+    vx[i] += ax[i] * DT; vy[i] += ay[i] * DT;
+    px[i] += (vx[i] + XSPH * xvx[i]) * DT;
+    py[i] += (vy[i] + XSPH * xvy[i]) * DT;
+    const d2 = px[i] * px[i] + py[i] * py[i];
+    if (d2 > Rin * Rin) {
+      const d = Math.sqrt(d2);
+      const nx = px[i] / d, ny = py[i] / d;
+      px[i] = nx * Rin; py[i] = ny * Rin;
+      const tx = -ny, ty = nx;
+      let vn = vx[i] * nx + vy[i] * ny;
+      let vt = vx[i] * tx + vy[i] * ty;
+      if (vn > 0) vn = -0.2 * vn;                 // damped bounce on the wall
+      vt += (omega * Rin - vt) * drag;            // drag toward wall speed
+      vx[i] = vn * nx + vt * tx;
+      vy[i] = vn * ny + vt * ty;
+    }
+  }
+  drumAngle += omega * DT;
+}
+
+/* ------------------------------- rendering ------------------------------- */
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const CX = cv.width / 2, CY = cv.height / 2;
+const PXM = (Math.min(cv.width, cv.height) / 2 - 36) / R;
+const PRAD = Math.max(2.5, dx * PXM * 0.62);
+
+function draw() {
+  ctx.clearRect(0, 0, cv.width, cv.height);
+
+  // drum body
+  ctx.beginPath(); ctx.arc(CX, CY, R * PXM + 14, 0, 7);
+  ctx.fillStyle = '#0d2138'; ctx.fill();
+  ctx.beginPath(); ctx.arc(CX, CY, R * PXM, 0, 7);
+  ctx.fillStyle = '#04101f'; ctx.fill();
+  ctx.lineWidth = 8; ctx.strokeStyle = '#28486e'; ctx.stroke();
+
+  // rotating lugs so the drum's motion is visible
+  ctx.fillStyle = '#4f7ba8';
+  for (let k = 0; k < 12; k++) {
+    const a = drumAngle + k * Math.PI / 6;
+    const r0 = R * PXM + 4;
+    ctx.beginPath();
+    ctx.arc(CX + r0 * Math.cos(a), CY - r0 * Math.sin(a), 4, 0, 7);
+    ctx.fill();
+  }
+
+  // particles, colored by speed (deep blue -> cyan -> white)
+  let vmax = 0, rsum = 0;
+  for (let i = 0; i < n; i++) {
+    const v = Math.hypot(vx[i], vy[i]);
+    if (v > vmax) vmax = v;
+    rsum += rho[i];
+    const t = Math.min(1, v / 5);
+    const L = 32 + 56 * t;             // lightness 32% .. 88%
+    const S = 90 - 30 * t * t;
+    ctx.fillStyle = `hsl(${204 - 14 * t} ${S}% ${L}%)`;
+    ctx.beginPath();
+    ctx.arc(CX + px[i] * PXM, CY - py[i] * PXM, PRAD, 0, 7);
+    ctx.fill();
+  }
+
+  srho.textContent = n ? (rsum / n / rho0).toFixed(3) : '—';
+  svel.textContent = vmax.toFixed(2) + ' m/s';
+}
+
+/* --------------------------------- wiring -------------------------------- */
+const omEl = document.getElementById('om');
+const fillEl = document.getElementById('fill');
+const muEl = document.getElementById('mu');
+const vom = document.getElementById('vom'), vfill = document.getElementById('vfill'), vmu = document.getElementById('vmu');
+const snum = document.getElementById('snum'), srho = document.getElementById('srho'),
+      svel = document.getElementById('svel'), sfps = document.getElementById('sfps');
+
+function syncLabels() {
+  omega = +omEl.value;
+  mu = +muEl.value;
+  vom.textContent = omega.toFixed(1) + ' rad/s';
+  vfill.textContent = fillEl.value + ' %';
+  vmu.textContent = mu.toFixed(2);
+}
+omEl.addEventListener('input', syncLabels);
+muEl.addEventListener('input', syncLabels);
+fillEl.addEventListener('input', () => { syncLabels(); init(); });
+document.getElementById('reset').addEventListener('click', init);
+const pauseBtn = document.getElementById('pause');
+pauseBtn.addEventListener('click', () => {
+  paused = !paused;
+  pauseBtn.textContent = paused ? 'Resume' : 'Pause';
+});
+
+let frames = 0, fpsT = performance.now();
+function frame() {
+  requestAnimationFrame(frame);
+  if (!paused) for (let i = 0; i < SUB; i++) step();
+  draw();
+  frames++;
+  const now = performance.now();
+  if (now - fpsT > 800) {
+    sfps.textContent = Math.round(frames * 1000 / (now - fpsT));
+    frames = 0; fpsT = now;
+  }
+}
+syncLabels();
+init();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

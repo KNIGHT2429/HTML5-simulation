@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Galton Board — collision physics</title>
+<style>
+  :root {
+    --bg: #eceff4;
+    --board: #f7f8fa;
+    --ink: #25303f;
+    --dim: #7c8798;
+    --peg: #2d3a4a;
+    --ball: #e0962f;
+    --curve: #c0392b;
+    --line: #d4d9e1;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--bg); color: var(--ink);
+    font-family: "Avenir Next", "Segoe UI", system-ui, sans-serif;
+    min-height: 100vh; display: flex; flex-direction: column; align-items: center;
+    padding: 18px 14px 30px;
+  }
+  h1 { font-size: 17px; font-weight: 600; letter-spacing: 0.02em; }
+  .sub { font-size: 12px; color: var(--dim); margin: 4px 0 14px; }
+  .wrap { display: flex; gap: 18px; flex-wrap: wrap; justify-content: center; align-items: flex-start; }
+  canvas { background: var(--board); border: 1px solid var(--line); border-radius: 12px; max-width: 100%; height: auto;
+           box-shadow: 0 6px 24px rgba(40,50,70,0.08); }
+  .panel { background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; width: 260px;
+           box-shadow: 0 6px 24px rgba(40,50,70,0.06); }
+  .panel h2 { font-size: 10.5px; letter-spacing: 0.16em; color: var(--dim); text-transform: uppercase; margin-bottom: 12px; }
+  .ctl { margin-bottom: 13px; }
+  .ctl label { display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 4px; }
+  .ctl label b { font-weight: 500; }
+  .ctl label span { color: var(--dim); font-variant-numeric: tabular-nums; }
+  input[type=range] { width: 100%; accent-color: #2d3a4a; height: 18px; }
+  .btns { display: flex; gap: 8px; margin-top: 4px; }
+  button { flex: 1; background: var(--peg); color: #fff; border: 0; border-radius: 7px; padding: 8px 0;
+           font: inherit; font-size: 13px; cursor: pointer; }
+  button.secondary { background: #e6eaf0; color: var(--ink); }
+  button:hover { filter: brightness(1.08); }
+  button:focus-visible { outline: 2px solid var(--ball); outline-offset: 2px; }
+  .stats { margin-top: 16px; border-top: 1px solid var(--line); padding-top: 12px; font-size: 13px; line-height: 1.9;
+           font-variant-numeric: tabular-nums; }
+  .stats .row { display: flex; justify-content: space-between; }
+  .stats .row span:first-child { color: var(--dim); }
+  .note { margin-top: 12px; font-size: 11px; color: var(--dim); line-height: 1.55; }
+  .swatch { display: inline-block; width: 9px; height: 9px; border-radius: 2px; vertical-align: baseline; margin-right: 5px; }
+</style>
+</head>
+<body>
+<h1>Galton Board</h1>
+<div class="sub">Gravity + restitution collisions — chance enters only through collision geometry, never a coin flip</div>
+<div class="wrap">
+  <canvas id="c" width="620" height="760"></canvas>
+  <div class="panel">
+    <h2>Controls</h2>
+    <div class="ctl"><label><b>Rows of pegs</b><span id="vrows"></span></label>
+      <input type="range" id="rows" min="5" max="15" step="1" value="11" aria-label="rows of pegs"></div>
+    <div class="ctl"><label><b>Drop rate</b><span id="vrate"></span></label>
+      <input type="range" id="rate" min="1" max="30" step="1" value="12" aria-label="drop rate"></div>
+    <div class="btns">
+      <button id="pause" class="secondary">Pause</button>
+      <button id="clear">Clear bins</button>
+    </div>
+    <div class="stats">
+      <div class="row"><span>balls counted</span><span id="stot">0</span></div>
+      <div class="row"><span>in flight</span><span id="sact">0</span></div>
+      <div class="row"><span>empirical mean</span><span id="smean">—</span></div>
+      <div class="row"><span>empirical σ</span><span id="ssig">—</span></div>
+    </div>
+    <div class="note">
+      <span class="swatch" style="background:var(--curve)"></span>Normal curve fitted to the
+      empirical mean and σ of the bins. Each ball starts with a sub-millimetre offset in drop
+      position; everything after that is deterministic rigid-body physics — the bell emerges
+      from the geometry alone. Changing rows resets the board.
+    </div>
+  </div>
+</div>
+
+<script>
+'use strict';
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const W = cv.width, H = cv.height;
+const GRAV = 1500;          // px/s²
+const E = 0.34;             // coefficient of restitution
+const TANG = 0.12;          // tangential (rolling) damping at peg contact
+const DT = 1 / 240;         // physics substep
+const SUB = 4;              // substeps per frame
+
+let rows, s, rowGap, pegR, ballR, pegs, nBins, bins, binW, halfSpan;
+let wnL, wnR, wp0L, wp0R;   // angled guide walls along the triangle edges
+const topY = 96, pegBottom = 470, binTop = 525, binFloor = H - 26;
+let balls = [], total = 0, paused = false, spawnAcc = 0;
+
+function buildBoard() {
+  rows = +rowsEl.value;
+  s = W / (rows + 3);
+  rowGap = (pegBottom - topY) / (rows - 1);
+  pegR = s * 0.13;
+  ballR = s * 0.17;
+  pegs = [];
+  for (let i = 0; i < rows; i++) {            // classic triangle: row i has i+1 pegs
+    const count = i + 1, y = topY + i * rowGap;
+    for (let k = 0; k < count; k++)
+      pegs.push({ x: cv.width / 2 + (k - (count - 1) / 2) * s, y });
+  }
+  nBins = rows + 1;
+  binW = s;
+  halfSpan = nBins * binW / 2;
+  // guide walls: lines through (cx ± wallGap, topY) parallel to the triangle edge
+  const wallGap = s * 0.62;
+  const wlen = Math.hypot(s / 2, rowGap);
+  wnL = { x: rowGap / wlen, y: (s / 2) / wlen };
+  wnR = { x: -rowGap / wlen, y: (s / 2) / wlen };
+  wp0L = { x: cv.width / 2 - wallGap, y: topY };
+  wp0R = { x: cv.width / 2 + wallGap, y: topY };
+  bins = new Array(nBins).fill(0);
+  balls = []; total = 0;
+}
+
+/* ------------------------------- physics --------------------------------- */
+function collidePeg(b, p) {
+  const dx = b.x - p.x, dy = b.y - p.y;
+  const rr = pegR + ballR, d2 = dx * dx + dy * dy;
+  if (d2 >= rr * rr || d2 < 1e-9) return;
+  const d = Math.sqrt(d2), nx = dx / d, ny = dy / d;
+  b.x = p.x + nx * rr; b.y = p.y + ny * rr;
+  const vn = b.vx * nx + b.vy * ny;
+  if (vn < 0) {
+    b.vx -= (1 + E) * vn * nx;
+    b.vy -= (1 + E) * vn * ny;
+    const vt = b.vx * -ny + b.vy * nx;       // damp tangential a little
+    b.vx -= TANG * vt * -ny;
+    b.vy -= TANG * vt * nx;
+  }
+}
+
+function collideWallLine(b, p0, n) {
+  const d = (b.x - p0.x) * n.x + (b.y - p0.y) * n.y;
+  if (d >= ballR) return;
+  b.x += (ballR - d) * n.x; b.y += (ballR - d) * n.y;
+  const vn = b.vx * n.x + b.vy * n.y;
+  if (vn < 0) { b.vx -= (1 + E) * vn * n.x; b.vy -= (1 + E) * vn * n.y; }
+}
+
+function collideBalls(a, b) {
+  const dx = b.x - a.x, dy = b.y - a.y;
+  const rr = 2 * ballR, d2 = dx * dx + dy * dy;
+  if (d2 >= rr * rr || d2 < 1e-9) return;
+  const d = Math.sqrt(d2), nx = dx / d, ny = dy / d;
+  const overlap = (rr - d) / 2;
+  a.x -= overlap * nx; a.y -= overlap * ny;
+  b.x += overlap * nx; b.y += overlap * ny;
+  const rvn = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny;
+  if (rvn < 0) {                              // equal-mass impulse
+    const j = -(1 + E) * rvn / 2;
+    a.vx -= j * nx; a.vy -= j * ny;
+    b.vx += j * nx; b.vy += j * ny;
+  }
+}
+
+function step() {
+  // spawn — randomness enters here only, as a tiny offset in drop position
+  spawnAcc += (+rateEl.value) * DT;
+  while (spawnAcc >= 1) {
+    spawnAcc -= 1;
+    const sx = cv.width / 2 + (Math.random() - 0.5) * ballR * 0.6;
+    // don't spawn inside another ball
+    if (!balls.some(b => (b.x - sx) ** 2 + (b.y - 22) ** 2 < (2.2 * ballR) ** 2))
+      balls.push({ x: sx, y: 22, vx: 0, vy: 0 });
+  }
+
+  for (const b of balls) {
+    b.vy += GRAV * DT;
+    b.x += b.vx * DT; b.y += b.vy * DT;
+    for (const p of pegs) collidePeg(b, p);
+    if (b.y > topY - 30 && b.y < pegBottom + rowGap) {
+      collideWallLine(b, wp0L, wnL);
+      collideWallLine(b, wp0R, wnR);
+    } else if (b.y >= pegBottom + rowGap) {
+      const cx0 = cv.width / 2;
+      if (b.x < cx0 - halfSpan + ballR) { b.x = cx0 - halfSpan + ballR; b.vx = Math.abs(b.vx) * E; }
+      if (b.x > cx0 + halfSpan - ballR) { b.x = cx0 + halfSpan - ballR; b.vx = -Math.abs(b.vx) * E; }
+    }
+  }
+  // ball–ball collisions (n is small; O(n²) is fine)
+  for (let i = 0; i < balls.length; i++)
+    for (let j = i + 1; j < balls.length; j++)
+      collideBalls(balls[i], balls[j]);
+
+  // count balls crossing into the bin region
+  const left = cv.width / 2 - halfSpan;
+  for (let i = balls.length - 1; i >= 0; i--) {
+    if (balls[i].y > binTop) {
+      let k = Math.floor((balls[i].x - left) / binW);
+      k = Math.max(0, Math.min(nBins - 1, k));
+      bins[k]++; total++;
+      balls.splice(i, 1);
+    }
+  }
+}
+
+/* ------------------------------- rendering ------------------------------- */
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  const cx0 = cv.width / 2;
+
+  // guide walls
+  ctx.strokeStyle = '#aeb8c6'; ctx.lineWidth = 3; ctx.lineCap = 'round';
+  const wallGap = s * 0.62;
+  const dyw = pegBottom + rowGap - topY;
+  const dxw = dyw * (s / 2) / rowGap;
+  ctx.beginPath();
+  ctx.moveTo(cx0 - wallGap, topY - 28); ctx.lineTo(cx0 - wallGap - dxw, topY - 28 + dyw + 28);
+  ctx.moveTo(cx0 + wallGap, topY - 28); ctx.lineTo(cx0 + wallGap + dxw, topY - 28 + dyw + 28);
+  ctx.stroke();
+
+  // pegs
+  ctx.fillStyle = '#2d3a4a';
+  for (const p of pegs) { ctx.beginPath(); ctx.arc(p.x, p.y, pegR, 0, 7); ctx.fill(); }
+
+  // bin dividers + floor
+  const left = cx0 - halfSpan;
+  ctx.strokeStyle = '#cdd3dc'; ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  for (let k = 0; k <= nBins; k++) {
+    ctx.moveTo(left + k * binW, binTop + 6);
+    ctx.lineTo(left + k * binW, binFloor);
+  }
+  ctx.moveTo(left, binFloor); ctx.lineTo(left + nBins * binW, binFloor);
+  ctx.stroke();
+
+  // histogram bars (auto-scaled)
+  const maxC = Math.max(1, ...bins);
+  const areaH = binFloor - (binTop + 14);
+  const unit = Math.min(areaH / maxC, 2.4 * ballR);
+  ctx.fillStyle = 'rgba(224,150,47,0.85)';
+  for (let k = 0; k < nBins; k++) {
+    const hgt = bins[k] * unit;
+    if (hgt > 0) ctx.fillRect(left + k * binW + 2, binFloor - hgt, binW - 4, hgt);
+  }
+
+  // falling balls
+  ctx.fillStyle = '#e0962f';
+  ctx.strokeStyle = 'rgba(120,80,15,0.5)'; ctx.lineWidth = 1;
+  for (const b of balls) {
+    ctx.beginPath(); ctx.arc(b.x, b.y, ballR, 0, 7); ctx.fill(); ctx.stroke();
+  }
+
+  // normal curve fit to empirical mean/σ
+  let mean = 0, sig = 0;
+  if (total > 20) {
+    bins.forEach((c, i) => mean += c * i); mean /= total;
+    bins.forEach((c, i) => sig += c * (i - mean) ** 2);
+    sig = Math.sqrt(sig / total) || 0.5;
+    ctx.strokeStyle = '#c0392b'; ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    for (let px = 0; px <= nBins * binW; px += 3) {
+      const u = (px / binW - 0.5 - mean) / sig;
+      const p = Math.exp(-0.5 * u * u) / (sig * Math.sqrt(2 * Math.PI)); // prob per bin
+      const y = binFloor - total * p * unit;
+      px === 0 ? ctx.moveTo(left + px, y) : ctx.lineTo(left + px, y);
+    }
+    ctx.stroke();
+    smean.textContent = mean.toFixed(2) + ' (ctr ' + ((nBins - 1) / 2).toFixed(1) + ')';
+    ssig.textContent = sig.toFixed(2) + ' bins';
+  } else {
+    smean.textContent = '—'; ssig.textContent = '—';
+  }
+  stot.textContent = total;
+  sact.textContent = balls.length;
+}
+
+/* --------------------------------- wiring -------------------------------- */
+const rowsEl = document.getElementById('rows');
+const rateEl = document.getElementById('rate');
+const vrows = document.getElementById('vrows'), vrate = document.getElementById('vrate');
+const stot = document.getElementById('stot'), sact = document.getElementById('sact');
+const smean = document.getElementById('smean'), ssig = document.getElementById('ssig');
+
+function syncLabels() {
+  vrows.textContent = rowsEl.value;
+  vrate.textContent = rateEl.value + ' / s';
+}
+rowsEl.addEventListener('input', () => { syncLabels(); buildBoard(); });
+rateEl.addEventListener('input', syncLabels);
+document.getElementById('clear').addEventListener('click', () => {
+  bins.fill(0); total = 0; balls = [];
+});
+const pauseBtn = document.getElementById('pause');
+pauseBtn.addEventListener('click', () => {
+  paused = !paused;
+  pauseBtn.textContent = paused ? 'Resume' : 'Pause';
+});
+
+function frame() {
+  requestAnimationFrame(frame);
+  if (!paused) for (let i = 0; i < SUB; i++) step();
+  draw();
+}
+syncLabels();
+buildBoard();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
